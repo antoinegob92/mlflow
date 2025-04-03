@@ -142,7 +142,7 @@ class SqlModelVersionTag(Base):
 
     version = Column(Integer)
 
-    key = Column(String(250), nullable=False)
+    key = Column(String(191), nullable=False)
 
     value = Column(String(5000), nullable=True)
 
