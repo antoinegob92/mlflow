@@ -176,7 +176,7 @@ CREATE TABLE model_version_tags (
 
 
 CREATE TABLE params (
-	key VARCHAR(250) NOT NULL,
+	key VARCHAR(191) NOT NULL,
 	value VARCHAR(8000) NOT NULL,
 	run_uuid VARCHAR(32) NOT NULL,
 	PRIMARY KEY (key, run_uuid),

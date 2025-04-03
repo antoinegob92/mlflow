@@ -219,9 +219,9 @@ class SqlMetric(Base):
 class SqlParam(Base):
     __tablename__ = "params"
 
-    key = Column(String(250))
+    key = Column(String(191))
     """
-    Param key: `String` (limit 250 characters). Part of *Primary Key* for ``params`` table.
+    Param key: `String` (limit 191 characters). Part of *Primary Key* for ``params`` table.
     """
     value = Column(String(250), nullable=False)
     """
