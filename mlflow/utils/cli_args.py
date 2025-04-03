@@ -1,11 +1,13 @@
 """
 Definitions of click options shared by several CLI commands.
 """
-import click
+
 import warnings
 
-from mlflow.utils import env_manager as _EnvManager
+import click
+
 from mlflow.environment_variables import MLFLOW_DISABLE_ENV_MANAGER_CONDA_WARNING
+from mlflow.utils import env_manager as _EnvManager
 
 MODEL_PATH = click.option(
     "--model-path",
@@ -79,10 +81,10 @@ def _resolve_env_manager(_, __, env_manager):
     return None
 
 
-def _create_env_manager_option(help_string):
+def _create_env_manager_option(help_string, default=None):
     return click.option(
         "--env-manager",
-        default=None,
+        default=default,
         type=click.UNPROCESSED,
         callback=_resolve_env_manager,
         help=help_string,
@@ -90,6 +92,7 @@ def _create_env_manager_option(help_string):
 
 
 ENV_MANAGER = _create_env_manager_option(
+    default=_EnvManager.VIRTUALENV,
     # '\b' prevents rewrapping text:
     # https://click.palletsprojects.com/en/8.1.x/documentation/#preventing-rewrapping
     help_string="""
@@ -118,6 +121,27 @@ environment manager. The following values are supported:
 If unspecified, the appropriate environment manager is automatically selected based on
 the project configuration. For example, if `MLproject.yaml` contains a `python_env` key,
 virtualenv is used.
+""",
+)
+
+ENV_MANAGER_DOCKERFILE = _create_env_manager_option(
+    default=None,
+    # '\b' prevents rewrapping text:
+    # https://click.palletsprojects.com/en/8.1.x/documentation/#preventing-rewrapping
+    help_string="""
+If specified, create an environment for MLmodel using the specified
+environment manager. The following values are supported:
+
+\b
+- local: use the local environment
+- virtualenv: use virtualenv (and pyenv for Python version management)
+- conda: use conda
+
+If unspecified, default to None, then MLflow will automatically pick the env manager
+based on the model's flavor configuration.
+If model-uri is specified: if python version is specified in the flavor configuration
+and no java installation is required, then we use local environment. Otherwise we use virtualenv.
+If no model-uri is provided, we use virtualenv.
 """,
 )
 
@@ -165,14 +189,18 @@ WORKERS = click.option(
     "-w",
     envvar="MLFLOW_WORKERS",
     default=None,
-    help="Number of gunicorn worker processes to handle requests (default: 4).",
+    help="Number of gunicorn worker processes to handle requests (default: 1).",
 )
 
 ENABLE_MLSERVER = click.option(
     "--enable-mlserver",
     is_flag=True,
     default=False,
-    help="Enable serving with MLServer through the v2 inference protocol.",
+    help=(
+        "Enable serving with MLServer through the v2 inference protocol. "
+        "You can use environment variables to configure MLServer. "
+        "(See https://mlserver.readthedocs.io/en/latest/reference/settings.html)"
+    ),
 )
 
 ARTIFACTS_DESTINATION = click.option(
@@ -205,4 +233,17 @@ NO_CONDA = click.option(
     "--no-conda",
     is_flag=True,
     help="If specified, use local environment.",
+)
+
+INSTALL_JAVA = click.option(
+    "--install-java",
+    is_flag=False,
+    flag_value=True,
+    default=None,
+    type=bool,
+    help="Installs Java in the image if needed. Default is None, "
+    "allowing MLflow to determine installation. Flavors requiring "
+    "Java, such as Spark, enable this automatically. "
+    "Note: This option only works with the UBUNTU base image; "
+    "Python base images do not support Java installation.",
 )

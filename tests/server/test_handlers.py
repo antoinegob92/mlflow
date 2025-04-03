@@ -1,86 +1,110 @@
 import json
 import uuid
-
-import pytest
 from unittest import mock
 
-import os
+import pytest
+
 import mlflow
 from mlflow.entities import ViewType
 from mlflow.entities.model_registry import (
-    RegisteredModel,
     ModelVersion,
-    RegisteredModelTag,
     ModelVersionTag,
+    RegisteredModel,
+    RegisteredModelTag,
 )
+from mlflow.entities.model_registry.prompt import IS_PROMPT_TAG_KEY, PROMPT_TEXT_TAG_KEY
+from mlflow.entities.trace_info import TraceInfo
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INTERNAL_ERROR, INVALID_PARAMETER_VALUE, ErrorCode
-from mlflow.server.handlers import (
-    get_endpoints,
-    _create_experiment,
-    _get_request_message,
-    _search_runs,
-    _log_batch,
-    catch_mlflow_exception,
-    _create_registered_model,
-    _update_registered_model,
-    _delete_registered_model,
-    _get_registered_model,
-    _search_registered_models,
-    _get_latest_versions,
-    _create_model_version,
-    _update_model_version,
-    _delete_model_version,
-    _get_model_version_download_uri,
-    _search_model_versions,
-    _get_model_version,
-    _transition_stage,
-    _rename_registered_model,
-    _set_registered_model_tag,
-    _delete_registered_model_tag,
-    _set_model_version_tag,
-    _delete_model_version_tag,
-)
-from mlflow.server import BACKEND_STORE_URI_ENV_VAR, app
-from mlflow.store.entities.paged_list import PagedList
-from mlflow.protos.service_pb2 import CreateExperiment, SearchRuns
 from mlflow.protos.model_registry_pb2 import (
-    CreateRegisteredModel,
-    UpdateRegisteredModel,
-    DeleteRegisteredModel,
-    SearchRegisteredModels,
-    GetRegisteredModel,
-    GetLatestVersions,
     CreateModelVersion,
-    UpdateModelVersion,
+    CreateRegisteredModel,
     DeleteModelVersion,
-    GetModelVersion,
-    GetModelVersionDownloadUri,
-    SearchModelVersions,
-    TransitionModelVersionStage,
-    RenameRegisteredModel,
-    SetRegisteredModelTag,
-    DeleteRegisteredModelTag,
-    SetModelVersionTag,
     DeleteModelVersionTag,
+    DeleteRegisteredModel,
+    DeleteRegisteredModelAlias,
+    DeleteRegisteredModelTag,
+    GetLatestVersions,
+    GetModelVersion,
+    GetModelVersionByAlias,
+    GetModelVersionDownloadUri,
+    GetRegisteredModel,
+    RenameRegisteredModel,
+    SearchModelVersions,
+    SearchRegisteredModels,
+    SetModelVersionTag,
+    SetRegisteredModelAlias,
+    SetRegisteredModelTag,
+    TransitionModelVersionStage,
+    UpdateModelVersion,
+    UpdateRegisteredModel,
 )
+from mlflow.protos.service_pb2 import CreateExperiment, SearchRuns
+from mlflow.server import (
+    ARTIFACTS_DESTINATION_ENV_VAR,
+    BACKEND_STORE_URI_ENV_VAR,
+    SERVE_ARTIFACTS_ENV_VAR,
+    app,
+)
+from mlflow.server.handlers import (
+    _convert_path_parameter_to_flask_format,
+    _create_experiment,
+    _create_model_version,
+    _create_registered_model,
+    _delete_artifact_mlflow_artifacts,
+    _delete_model_version,
+    _delete_model_version_tag,
+    _delete_registered_model,
+    _delete_registered_model_alias,
+    _delete_registered_model_tag,
+    _get_latest_versions,
+    _get_model_version,
+    _get_model_version_by_alias,
+    _get_model_version_download_uri,
+    _get_registered_model,
+    _get_request_message,
+    _get_trace_artifact_repo,
+    _log_batch,
+    _rename_registered_model,
+    _search_model_versions,
+    _search_registered_models,
+    _search_runs,
+    _set_model_version_tag,
+    _set_registered_model_alias,
+    _set_registered_model_tag,
+    _transition_stage,
+    _update_model_version,
+    _update_registered_model,
+    _validate_source,
+    catch_mlflow_exception,
+    get_endpoints,
+)
+from mlflow.store.artifact.azure_blob_artifact_repo import AzureBlobArtifactRepository
+from mlflow.store.artifact.local_artifact_repo import LocalArtifactRepository
+from mlflow.store.artifact.s3_artifact_repo import S3ArtifactRepository
+from mlflow.store.entities.paged_list import PagedList
+from mlflow.store.model_registry import (
+    SEARCH_MODEL_VERSION_MAX_RESULTS_THRESHOLD,
+    SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT,
+)
+from mlflow.utils.mlflow_tags import MLFLOW_ARTIFACT_LOCATION
 from mlflow.utils.proto_json_utils import message_to_json
 from mlflow.utils.validation import MAX_BATCH_LOG_REQUEST_SIZE
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_get_request_message():
     with mock.patch("mlflow.server.handlers._get_request_message") as m:
         yield m
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_get_request_json():
     with mock.patch("mlflow.server.handlers._get_request_json") as m:
         yield m
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_tracking_store():
     with mock.patch("mlflow.server.handlers._get_tracking_store") as m:
         mock_store = mock.MagicMock()
@@ -88,12 +112,17 @@ def mock_tracking_store():
         yield mock_store
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_model_registry_store():
     with mock.patch("mlflow.server.handlers._get_model_registry_store") as m:
         mock_store = mock.MagicMock()
         m.return_value = mock_store
         yield mock_store
+
+
+@pytest.fixture
+def enable_serve_artifacts(monkeypatch):
+    monkeypatch.setenv(SERVE_ARTIFACTS_ENV_VAR, "true")
 
 
 def test_health():
@@ -114,6 +143,17 @@ def test_get_endpoints():
     endpoints = get_endpoints()
     create_experiment_endpoint = [e for e in endpoints if e[1] == _create_experiment]
     assert len(create_experiment_endpoint) == 2
+
+
+def test_convert_path_parameter_to_flask_format():
+    converted = _convert_path_parameter_to_flask_format("/mlflow/trace")
+    assert "/mlflow/trace" == converted
+
+    converted = _convert_path_parameter_to_flask_format("/mlflow/trace/{request_id}")
+    assert "/mlflow/trace/<request_id>" == converted
+
+    converted = _convert_path_parameter_to_flask_format("/mlflow/{foo}/{bar}/{baz}")
+    assert "/mlflow/<foo>/<bar>/<baz>" == converted
 
 
 def test_all_model_registry_endpoints_available():
@@ -147,6 +187,7 @@ def test_all_model_registry_endpoints_available():
 def test_can_parse_json():
     request = mock.MagicMock()
     request.method = "POST"
+    request.content_type = "application/json"
     request.get_json = mock.MagicMock()
     request.get_json.return_value = {"name": "hello"}
     msg = _get_request_message(CreateExperiment(), flask_request=request)
@@ -156,8 +197,19 @@ def test_can_parse_json():
 def test_can_parse_post_json_with_unknown_fields():
     request = mock.MagicMock()
     request.method = "POST"
+    request.content_type = "application/json"
     request.get_json = mock.MagicMock()
     request.get_json.return_value = {"name": "hello", "WHAT IS THIS FIELD EVEN": "DOING"}
+    msg = _get_request_message(CreateExperiment(), flask_request=request)
+    assert msg.name == "hello"
+
+
+def test_can_parse_post_json_with_content_type_params():
+    request = mock.MagicMock()
+    request.method = "POST"
+    request.content_type = "application/json; charset=utf-8"
+    request.get_json = mock.MagicMock()
+    request.get_json.return_value = {"name": "hello"}
     msg = _get_request_message(CreateExperiment(), flask_request=request)
     assert msg.name == "hello"
 
@@ -165,7 +217,7 @@ def test_can_parse_post_json_with_unknown_fields():
 def test_can_parse_get_json_with_unknown_fields():
     request = mock.MagicMock()
     request.method = "GET"
-    request.query_string = b"name=hello&superDuperUnknown=field"
+    request.args = {"name": "hello", "superDuperUnknown": "field"}
     msg = _get_request_message(CreateExperiment(), flask_request=request)
     assert msg.name == "hello"
 
@@ -175,10 +227,31 @@ def test_can_parse_get_json_with_unknown_fields():
 def test_can_parse_json_string():
     request = mock.MagicMock()
     request.method = "POST"
+    request.content_type = "application/json"
     request.get_json = mock.MagicMock()
     request.get_json.return_value = '{"name": "hello2"}'
     msg = _get_request_message(CreateExperiment(), flask_request=request)
     assert msg.name == "hello2"
+
+
+def test_can_block_post_request_with_invalid_content_type():
+    request = mock.MagicMock()
+    request.method = "POST"
+    request.content_type = "text/plain"
+    request.get_json = mock.MagicMock()
+    request.get_json.return_value = {"name": "hello"}
+    with pytest.raises(MlflowException, match=r"Bad Request. Content-Type"):
+        _get_request_message(CreateExperiment(), flask_request=request)
+
+
+def test_can_block_post_request_with_missing_content_type():
+    request = mock.MagicMock()
+    request.method = "POST"
+    request.content_type = None
+    request.get_json = mock.MagicMock()
+    request.get_json.return_value = {"name": "hello"}
+    with pytest.raises(MlflowException, match=r"Bad Request. Content-Type"):
+        _get_request_message(CreateExperiment(), flask_request=request)
 
 
 def test_search_runs_default_view_type(mock_get_request_message, mock_tracking_store):
@@ -199,7 +272,7 @@ def test_log_batch_api_req(mock_get_request_json):
     json_response = json.loads(response.get_data())
     assert json_response["error_code"] == ErrorCode.Name(INVALID_PARAMETER_VALUE)
     assert (
-        "Batched logging API requests must be at most %s bytes" % MAX_BATCH_LOG_REQUEST_SIZE
+        f"Batched logging API requests must be at most {MAX_BATCH_LOG_REQUEST_SIZE} bytes"
         in json_response["message"]
     )
 
@@ -209,7 +282,6 @@ def test_catch_mlflow_exception():
     def test_handler():
         raise MlflowException("test error", error_code=INTERNAL_ERROR)
 
-    # pylint: disable=assignment-from-no-return
     response = test_handler()
     json_response = json.loads(response.get_data())
     assert response.status_code == 500
@@ -217,21 +289,15 @@ def test_catch_mlflow_exception():
     assert json_response["message"] == "test error"
 
 
-def test_mlflow_server_with_installed_plugin(tmpdir):
+def test_mlflow_server_with_installed_plugin(tmp_path, monkeypatch):
     """This test requires the package in tests/resources/mlflow-test-plugin to be installed"""
     from mlflow_test_plugin.file_store import PluginFileStore
 
-    env = {
-        BACKEND_STORE_URI_ENV_VAR: "file-plugin:%s" % tmpdir.strpath,
-    }
-    with mock.patch.dict(os.environ, env):
-        mlflow.server.handlers._tracking_store = None
-        try:
-            plugin_file_store = mlflow.server.handlers._get_tracking_store()
-        finally:
-            mlflow.server.handlers._tracking_store = None
-        assert isinstance(plugin_file_store, PluginFileStore)
-        assert plugin_file_store.is_plugin
+    monkeypatch.setenv(BACKEND_STORE_URI_ENV_VAR, f"file-plugin:{tmp_path}")
+    monkeypatch.setattr(mlflow.server.handlers, "_tracking_store", None)
+    plugin_file_store = mlflow.server.handlers._get_tracking_store()
+    assert isinstance(plugin_file_store, PluginFileStore)
+    assert plugin_file_store.is_plugin
 
 
 def jsonify(obj):
@@ -334,14 +400,24 @@ def test_search_registered_models(mock_get_request_message, mock_model_registry_
     mock_model_registry_store.search_registered_models.return_value = PagedList(rmds, None)
     resp = _search_registered_models()
     _, args = mock_model_registry_store.search_registered_models.call_args
-    assert args == {"filter_string": "", "max_results": 100, "order_by": [], "page_token": ""}
+    assert args == {
+        "filter_string": "",
+        "max_results": SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT,
+        "order_by": [],
+        "page_token": "",
+    }
     assert json.loads(resp.get_data()) == {"registered_models": jsonify(rmds)}
 
     mock_get_request_message.return_value = SearchRegisteredModels(filter="hello")
     mock_model_registry_store.search_registered_models.return_value = PagedList(rmds[:1], "tok")
     resp = _search_registered_models()
     _, args = mock_model_registry_store.search_registered_models.call_args
-    assert args == {"filter_string": "hello", "max_results": 100, "order_by": [], "page_token": ""}
+    assert args == {
+        "filter_string": "hello",
+        "max_results": SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT,
+        "order_by": [],
+        "page_token": "",
+    }
     assert json.loads(resp.get_data()) == {
         "registered_models": jsonify(rmds[:1]),
         "next_page_token": "tok",
@@ -441,7 +517,7 @@ def test_create_model_version(mock_get_request_message, mock_model_registry_stor
     run_link = "localhost:5000/path/to/run"
     mock_get_request_message.return_value = CreateModelVersion(
         name="model_1",
-        source="A/B",
+        source=f"runs:/{run_id}",
         run_id=run_id,
         run_link=run_link,
         tags=[tag.to_proto() for tag in tags],
@@ -453,7 +529,7 @@ def test_create_model_version(mock_get_request_message, mock_model_registry_stor
     resp = _create_model_version()
     _, args = mock_model_registry_store.create_model_version.call_args
     assert args["name"] == "model_1"
-    assert args["source"] == "A/B"
+    assert args["source"] == f"runs:/{run_id}"
     assert args["run_id"] == run_id
     assert {tag.key: tag.value for tag in args["tags"]} == {tag.key: tag.value for tag in tags}
     assert args["run_link"] == run_link
@@ -557,13 +633,12 @@ def test_get_model_version_download_uri(mock_get_request_message, mock_model_reg
 
 
 def test_search_model_versions(mock_get_request_message, mock_model_registry_store):
-    mock_get_request_message.return_value = SearchModelVersions(filter="source_path = 'A/B/CD'")
     mvds = [
         ModelVersion(
             name="model_1",
             version="5",
             creation_timestamp=100,
-            last_updated_timestamp=1200,
+            last_updated_timestamp=3200,
             description="v 5",
             user_id="u1",
             current_stage="Production",
@@ -589,7 +664,7 @@ def test_search_model_versions(mock_get_request_message, mock_model_registry_sto
             name="ads_model",
             version="8",
             creation_timestamp=200,
-            last_updated_timestamp=2000,
+            last_updated_timestamp=1000,
             description="v 8",
             user_id="u1",
             current_stage="Staging",
@@ -602,7 +677,7 @@ def test_search_model_versions(mock_get_request_message, mock_model_registry_sto
             name="fraud_detection_model",
             version="345",
             creation_timestamp=1000,
-            last_updated_timestamp=1001,
+            last_updated_timestamp=999,
             description="newest version",
             user_id="u12",
             current_stage="None",
@@ -612,11 +687,56 @@ def test_search_model_versions(mock_get_request_message, mock_model_registry_sto
             status_message=None,
         ),
     ]
-    mock_model_registry_store.search_model_versions.return_value = mvds
+    mock_get_request_message.return_value = SearchModelVersions(filter="source_path = 'A/B/CD'")
+    mock_model_registry_store.search_model_versions.return_value = PagedList(mvds, None)
     resp = _search_model_versions()
-    args, _ = mock_model_registry_store.search_model_versions.call_args
-    assert args == ("source_path = 'A/B/CD'",)
+    mock_model_registry_store.search_model_versions.assert_called_with(
+        filter_string="source_path = 'A/B/CD'",
+        max_results=SEARCH_MODEL_VERSION_MAX_RESULTS_THRESHOLD,
+        order_by=[],
+        page_token="",
+    )
     assert json.loads(resp.get_data()) == {"model_versions": jsonify(mvds)}
+
+    mock_get_request_message.return_value = SearchModelVersions(filter="name='model_1'")
+    mock_model_registry_store.search_model_versions.return_value = PagedList(mvds[:1], "tok")
+    resp = _search_model_versions()
+    mock_model_registry_store.search_model_versions.assert_called_with(
+        filter_string="name='model_1'",
+        max_results=SEARCH_MODEL_VERSION_MAX_RESULTS_THRESHOLD,
+        order_by=[],
+        page_token="",
+    )
+    assert json.loads(resp.get_data()) == {
+        "model_versions": jsonify(mvds[:1]),
+        "next_page_token": "tok",
+    }
+
+    mock_get_request_message.return_value = SearchModelVersions(filter="version<=12", max_results=2)
+    mock_model_registry_store.search_model_versions.return_value = PagedList(
+        [mvds[0], mvds[2]], "next"
+    )
+    resp = _search_model_versions()
+    mock_model_registry_store.search_model_versions.assert_called_with(
+        filter_string="version<=12", max_results=2, order_by=[], page_token=""
+    )
+    assert json.loads(resp.get_data()) == {
+        "model_versions": jsonify([mvds[0], mvds[2]]),
+        "next_page_token": "next",
+    }
+
+    mock_get_request_message.return_value = SearchModelVersions(
+        filter="version<=12", max_results=2, order_by=["version DESC"], page_token="prev"
+    )
+    mock_model_registry_store.search_model_versions.return_value = PagedList(mvds[1:3], "next")
+    resp = _search_model_versions()
+    mock_model_registry_store.search_model_versions.assert_called_with(
+        filter_string="version<=12", max_results=2, order_by=["version DESC"], page_token="prev"
+    )
+    assert json.loads(resp.get_data()) == {
+        "model_versions": jsonify(mvds[1:3]),
+        "next_page_token": "next",
+    }
 
 
 def test_set_model_version_tag(mock_get_request_message, mock_model_registry_store):
@@ -641,3 +761,180 @@ def test_delete_model_version_tag(mock_get_request_message, mock_model_registry_
     _delete_model_version_tag()
     _, args = mock_model_registry_store.delete_model_version_tag.call_args
     assert args == {"name": name, "version": version, "key": key}
+
+
+def test_set_registered_model_alias(mock_get_request_message, mock_model_registry_store):
+    name = "model1"
+    alias = "test_alias"
+    version = "1"
+    mock_get_request_message.return_value = SetRegisteredModelAlias(
+        name=name, alias=alias, version=version
+    )
+    _set_registered_model_alias()
+    _, args = mock_model_registry_store.set_registered_model_alias.call_args
+    assert args == {"name": name, "alias": alias, "version": version}
+
+
+def test_delete_registered_model_alias(mock_get_request_message, mock_model_registry_store):
+    name = "model1"
+    alias = "test_alias"
+    mock_get_request_message.return_value = DeleteRegisteredModelAlias(name=name, alias=alias)
+    _delete_registered_model_alias()
+    _, args = mock_model_registry_store.delete_registered_model_alias.call_args
+    assert args == {"name": name, "alias": alias}
+
+
+def test_get_model_version_by_alias(mock_get_request_message, mock_model_registry_store):
+    name = "model1"
+    alias = "test_alias"
+    mock_get_request_message.return_value = GetModelVersionByAlias(name=name, alias=alias)
+    mvd = ModelVersion(
+        name="model1",
+        version="5",
+        creation_timestamp=1,
+        last_updated_timestamp=12,
+        description="v 5",
+        user_id="u1",
+        current_stage="Production",
+        source="A/B",
+        run_id=uuid.uuid4().hex,
+        status="READY",
+        status_message=None,
+        aliases=["test_alias"],
+    )
+    mock_model_registry_store.get_model_version_by_alias.return_value = mvd
+    resp = _get_model_version_by_alias()
+    _, args = mock_model_registry_store.get_model_version_by_alias.call_args
+    assert args == {"name": name, "alias": alias}
+    assert json.loads(resp.get_data()) == {"model_version": jsonify(mvd)}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/path",
+        "path/../to/file",
+        "/etc/passwd",
+        "/etc/passwd%00.jpg",
+        "/file://etc/passwd",
+        "%2E%2E%2F%2E%2E%2Fpath",
+    ],
+)
+def test_delete_artifact_mlflow_artifacts_throws_for_malicious_path(enable_serve_artifacts, path):
+    response = _delete_artifact_mlflow_artifacts(path)
+    assert response.status_code == 400
+    json_response = json.loads(response.get_data())
+    assert json_response["error_code"] == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    assert json_response["message"] == "Invalid path"
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://host#/abc/etc/",
+        "http://host/;..%2F..%2Fetc",
+    ],
+)
+def test_local_file_read_write_by_pass_vulnerability(uri):
+    request = mock.MagicMock()
+    request.method = "POST"
+    request.content_type = "application/json; charset=utf-8"
+    request.get_json = mock.MagicMock()
+    request.get_json.return_value = {
+        "name": "hello",
+        "artifact_location": uri,
+    }
+    msg = _get_request_message(CreateExperiment(), flask_request=request)
+    with mock.patch("mlflow.server.handlers._get_request_message", return_value=msg):
+        response = _create_experiment()
+        json_response = json.loads(response.get_data())
+        assert (
+            json_response["message"] == "'artifact_location' URL can't include fragments or params."
+        )
+
+    # Test if source is a local filesystem path, `_validate_source` validates that the run
+    # artifact_uri is also a local filesystem path.
+    run_id = uuid.uuid4().hex
+    with mock.patch("mlflow.server.handlers._get_tracking_store") as mock_get_tracking_store:
+        mock_get_tracking_store().get_run(
+            run_id
+        ).info.artifact_uri = f"http://host/{run_id}/artifacts/abc"
+
+        with pytest.raises(
+            MlflowException,
+            match=(
+                "the run_id request parameter has to be specified and the local "
+                "path has to be contained within the artifact directory of the "
+                "run specified by the run_id"
+            ),
+        ):
+            _validate_source("/local/path/xyz", run_id)
+
+
+@pytest.mark.parametrize(
+    ("location", "expected_class", "expected_uri"),
+    [
+        ("file:///0/traces/123", LocalArtifactRepository, "file:///0/traces/123"),
+        ("s3://bucket/0/traces/123", S3ArtifactRepository, "s3://bucket/0/traces/123"),
+        (
+            "wasbs://container@account.blob.core.windows.net/bucket/1/traces/123",
+            AzureBlobArtifactRepository,
+            "wasbs://container@account.blob.core.windows.net/bucket/1/traces/123",
+        ),
+        # Proxy URI must be resolved to the actual storage URI
+        (
+            "https://127.0.0.1/api/2.0/mlflow-artifacts/artifacts/2/traces/123",
+            S3ArtifactRepository,
+            "s3://bucket/2/traces/123",
+        ),
+        ("mlflow-artifacts:/1/traces/123", S3ArtifactRepository, "s3://bucket/1/traces/123"),
+    ],
+)
+def test_get_trace_artifact_repo(location, expected_class, expected_uri, monkeypatch):
+    monkeypatch.setenv(SERVE_ARTIFACTS_ENV_VAR, "true")
+    monkeypatch.setenv(ARTIFACTS_DESTINATION_ENV_VAR, "s3://bucket")
+    trace_info = TraceInfo("123", "0", 0, 1, "OK", tags={MLFLOW_ARTIFACT_LOCATION: location})
+    repo = _get_trace_artifact_repo(trace_info)
+    assert isinstance(repo, expected_class)
+    assert repo.artifact_uri == expected_uri
+
+
+### Prompt Registry Tests ###
+def test_create_prompt_as_registered_model(mock_get_request_message, mock_model_registry_store):
+    tags = [RegisteredModelTag(key=IS_PROMPT_TAG_KEY, value="true")]
+    mock_get_request_message.return_value = CreateRegisteredModel(
+        name="model_1", tags=[tag.to_proto() for tag in tags]
+    )
+    rm = RegisteredModel("model_1", tags=tags)
+    mock_model_registry_store.create_registered_model.return_value = rm
+    resp = _create_registered_model()
+    _, args = mock_model_registry_store.create_registered_model.call_args
+    assert args["name"] == "model_1"
+    assert {tag.key: tag.value for tag in args["tags"]} == {tag.key: tag.value for tag in tags}
+    assert json.loads(resp.get_data()) == {"registered_model": jsonify(rm)}
+
+
+def test_create_prompt_as_model_version(mock_get_request_message, mock_model_registry_store):
+    tags = [
+        ModelVersionTag(key=IS_PROMPT_TAG_KEY, value="true"),
+        ModelVersionTag(key=PROMPT_TEXT_TAG_KEY, value="some prompt text"),
+    ]
+    mock_get_request_message.return_value = CreateModelVersion(
+        name="model_1",
+        tags=[tag.to_proto() for tag in tags],
+        source=None,
+        run_id=None,
+        run_link=None,
+    )
+    mv = ModelVersion(
+        name="prompt_1", version="12", creation_timestamp=123, tags=tags, run_link=None
+    )
+    mock_model_registry_store.create_model_version.return_value = mv
+    resp = _create_model_version()
+    _, args = mock_model_registry_store.create_model_version.call_args
+    assert args["name"] == "model_1"
+    assert args["source"] == ""
+    assert args["run_id"] == ""
+    assert {tag.key: tag.value for tag in args["tags"]} == {tag.key: tag.value for tag in tags}
+    assert args["run_link"] == ""
+    assert json.loads(resp.get_data()) == {"model_version": jsonify(mv)}

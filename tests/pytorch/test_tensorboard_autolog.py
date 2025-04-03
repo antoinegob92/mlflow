@@ -1,4 +1,5 @@
 import time
+
 import mlflow
 import mlflow.pytorch
 
@@ -6,11 +7,11 @@ NUM_EPOCHS = 20
 START_STEP = 3
 
 
-def test_pytorch_autolog_logs_expected_data(tmpdir):
+def test_pytorch_autolog_logs_expected_data(tmp_path):
     from torch.utils.tensorboard import SummaryWriter
 
     mlflow.pytorch.autolog(log_every_n_step=1)
-    writer = SummaryWriter(str(tmpdir))
+    writer = SummaryWriter(str(tmp_path))
 
     timestamps = []
     with mlflow.start_run() as run:
@@ -20,7 +21,7 @@ def test_pytorch_autolog_logs_expected_data(tmpdir):
             t1 = time.time()
             timestamps.append((int(t0 * 1000), int(t1 * 1000)))
 
-        writer.add_hparams(dict(hparam1=42, hparam2="foo"), dict(final_loss=8))
+        writer.add_hparams({"hparam1": 42, "hparam2": "foo"}, {"final_loss": 8})
         writer.close()
 
     # Checking if metrics are logged.

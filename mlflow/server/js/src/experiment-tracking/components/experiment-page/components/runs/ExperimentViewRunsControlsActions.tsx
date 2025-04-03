@@ -1,44 +1,36 @@
-import { Button, Option, Select } from '@databricks/design-system';
+import { Button } from '@databricks/design-system';
 import { Theme } from '@emotion/react';
-import React, { useCallback, useMemo, useState } from 'react';
-import { FormattedMessage, useIntl } from 'react-intl';
-import { useHistory } from 'react-router-dom';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { FormattedMessage } from 'react-intl';
+import { useNavigate } from '../../../../../common/utils/RoutingUtils';
+import { LegacyTooltip } from '@databricks/design-system';
 import { LIFECYCLE_FILTER } from '../../../../constants';
 import Routes from '../../../../routes';
-import { UpdateExperimentSearchFacetsFn } from '../../../../types';
-import { SearchExperimentRunsFacetsState } from '../../models/SearchExperimentRunsFacetsState';
-import { SearchExperimentRunsViewState } from '../../models/SearchExperimentRunsViewState';
-import { getStartTimeColumnDisplayName } from '../../utils/experimentPage.common-utils';
+import { ExperimentPageViewState } from '../../models/ExperimentPageViewState';
 import { ExperimentRunsSelectorResult } from '../../utils/experimentRuns.selector';
 import { ExperimentViewRunModals } from './ExperimentViewRunModals';
+import { ExperimentPageSearchFacetsState } from '../../models/ExperimentPageSearchFacetsState';
+import { RunInfoEntity } from '../../../../types';
+import { useDesignSystemTheme } from '@databricks/design-system';
+import { ExperimentViewRunsControlsActionsSelectTags } from './ExperimentViewRunsControlsActionsSelectTags';
 
 export type ExperimentViewRunsControlsActionsProps = {
-  viewState: SearchExperimentRunsViewState;
-
-  searchFacetsState: SearchExperimentRunsFacetsState;
-  updateSearchFacets: UpdateExperimentSearchFacetsFn;
+  viewState: ExperimentPageViewState;
+  searchFacetsState: ExperimentPageSearchFacetsState;
   runsData: ExperimentRunsSelectorResult;
-
-  visibleRowsCount: number;
+  refreshRuns: () => void;
 };
 
+const CompareRunsButtonWrapper: React.FC = ({ children }) => <>{children}</>;
+
 export const ExperimentViewRunsControlsActions = React.memo(
-  ({
-    viewState,
-    runsData,
-    searchFacetsState,
-    updateSearchFacets,
-    visibleRowsCount,
-  }: ExperimentViewRunsControlsActionsProps) => {
+  ({ viewState, runsData, searchFacetsState, refreshRuns }: ExperimentViewRunsControlsActionsProps) => {
     const { runsSelected } = viewState;
-    const { runInfos } = runsData;
-    const { lifecycleFilter, startTime } = searchFacetsState;
+    const { runInfos, tagsList } = runsData;
+    const { lifecycleFilter } = searchFacetsState;
 
-    const history = useHistory();
-    const intl = useIntl();
-
-    // List of labels for "start time" filter
-    const startTimeColumnLabels = useMemo(() => getStartTimeColumnDisplayName(intl), [intl]);
+    const navigate = useNavigate();
+    const { theme } = useDesignSystemTheme();
 
     const [showDeleteRunModal, setShowDeleteRunModal] = useState(false);
     const [showRestoreRunModal, setShowRestoreRunModal] = useState(false);
@@ -47,9 +39,9 @@ export const ExperimentViewRunsControlsActions = React.memo(
 
     const renameButtonClicked = useCallback(() => {
       const runsSelectedList = Object.keys(runsSelected);
-      const selectedRun = runInfos.find((info) => info.run_uuid === runsSelectedList[0]);
+      const selectedRun = runInfos.find((info) => info.runUuid === runsSelectedList[0]);
       if (selectedRun) {
-        setRenamedRunName(selectedRun.run_name);
+        setRenamedRunName(selectedRun.runName);
         setShowRenameRunModal(true);
       }
     }, [runInfos, runsSelected]);
@@ -57,12 +49,11 @@ export const ExperimentViewRunsControlsActions = React.memo(
     const compareButtonClicked = useCallback(() => {
       const runsSelectedList = Object.keys(runsSelected);
       const experimentIds = runInfos
-        .filter(({ run_uuid }: any) => runsSelectedList.includes(run_uuid))
-        .map(({ experiment_id }: any) => experiment_id);
-      history.push(
-        Routes.getCompareRunPageRoute(runsSelectedList, [...new Set(experimentIds)].sort()),
-      );
-    }, [history, runInfos, runsSelected]);
+        .filter(({ runUuid }: RunInfoEntity) => runsSelectedList.includes(runUuid))
+        .map(({ experimentId }: any) => experimentId);
+
+      navigate(Routes.getCompareRunPageRoute(runsSelectedList, [...new Set(experimentIds)].sort()));
+    }, [navigate, runInfos, runsSelected]);
 
     const onDeleteRun = useCallback(() => setShowDeleteRunModal(true), []);
     const onRestoreRun = useCallback(() => setShowRestoreRunModal(true), []);
@@ -76,28 +67,73 @@ export const ExperimentViewRunsControlsActions = React.memo(
     const canCompareRuns = selectedRunsCount > 1;
     const showActionButtons = canCompareRuns || canRenameRuns || canRestoreRuns;
 
-    const currentLifecycleFilterLabel = (
-      <>
-        <FormattedMessage
-          defaultMessage='State:'
-          description='Filtering label to filter experiments based on state of active or deleted'
-        />{' '}
-        {lifecycleFilter}
-      </>
-    );
-
-    const currentStartTimeFilterLabel = (
-      <>
-        <FormattedMessage
-          defaultMessage='Time created'
-          description='Label for the start time select dropdown for experiment runs view'
-        />
-        : {startTimeColumnLabels[startTime as keyof typeof startTimeColumnLabels]}
-      </>
-    );
-
     return (
-      <div css={styles.controlBar}>
+      <>
+        <div css={styles.controlBar}>
+          <Button
+            componentId="codegen_mlflow_app_src_experiment-tracking_components_experiment-page_components_runs_experimentviewrunscontrolsactions.tsx_110"
+            data-testid="run-rename-button"
+            onClick={renameButtonClicked}
+            disabled={!canRenameRuns}
+          >
+            <FormattedMessage
+              defaultMessage="Rename"
+              description="Label for the rename run button above the experiment runs table"
+            />
+          </Button>
+          {lifecycleFilter === LIFECYCLE_FILTER.ACTIVE ? (
+            <Button
+              componentId="codegen_mlflow_app_src_experiment-tracking_components_experiment-page_components_runs_experimentviewrunscontrolsactions.tsx_117"
+              data-testid="runs-delete-button"
+              disabled={!canRestoreRuns}
+              onClick={onDeleteRun}
+              danger
+            >
+              <FormattedMessage
+                defaultMessage="Delete"
+                // eslint-disable-next-line max-len
+                description="String for the delete button to delete a particular experiment run"
+              />
+            </Button>
+          ) : null}
+          {lifecycleFilter === LIFECYCLE_FILTER.DELETED ? (
+            <Button
+              componentId="codegen_mlflow_app_src_experiment-tracking_components_experiment-page_components_runs_experimentviewrunscontrolsactions.tsx_126"
+              data-testid="runs-restore-button"
+              disabled={!canRestoreRuns}
+              onClick={onRestoreRun}
+            >
+              <FormattedMessage
+                defaultMessage="Restore"
+                // eslint-disable-next-line max-len
+                description="String for the restore button to undo the experiments that were deleted"
+              />
+            </Button>
+          ) : null}
+          <div css={styles.buttonSeparator} />
+          <CompareRunsButtonWrapper>
+            <Button
+              componentId="codegen_mlflow_app_src_experiment-tracking_components_experiment-page_components_runs_experimentviewrunscontrolsactions.tsx_136"
+              data-testid="runs-compare-button"
+              disabled={!canCompareRuns}
+              onClick={compareButtonClicked}
+            >
+              <FormattedMessage
+                defaultMessage="Compare"
+                // eslint-disable-next-line max-len
+                description="String for the compare button to compare experiment runs to find an ideal model"
+              />
+            </Button>
+          </CompareRunsButtonWrapper>
+
+          <div css={styles.buttonSeparator} />
+          <ExperimentViewRunsControlsActionsSelectTags
+            runsSelected={runsSelected}
+            runInfos={runInfos}
+            tagsList={tagsList}
+            refreshRuns={refreshRuns}
+          />
+        </div>
         <ExperimentViewRunModals
           runsSelected={runsSelected}
           onCloseRenameRunModal={onCloseRenameRunModal}
@@ -107,131 +143,23 @@ export const ExperimentViewRunsControlsActions = React.memo(
           showRestoreRunModal={showRestoreRunModal}
           showRenameRunModal={showRenameRunModal}
           renamedRunName={renamedRunName}
+          refreshRuns={refreshRuns}
         />
-
-        {!showActionButtons && (
-          <>
-            <Select
-              className='start-time-select'
-              value={{ value: startTime, label: currentStartTimeFilterLabel }}
-              labelInValue
-              onChange={({ value: newStartTime }) => {
-                updateSearchFacets({ startTime: newStartTime });
-              }}
-              data-test-id='start-time-select-dropdown'
-              // Temporarily we're disabling virtualized list to maintain
-              // backwards compatiblity. Functional unit tests rely heavily
-              // on non-virtualized values.
-              dangerouslySetAntdProps={{ virtual: false } as any}
-            >
-              {Object.keys(startTimeColumnLabels).map((startTimeKey) => (
-                <Option
-                  key={startTimeKey}
-                  title={startTimeColumnLabels[startTimeKey as keyof typeof startTimeColumnLabels]}
-                  data-test-id={`start-time-select-${startTimeKey}`}
-                  value={startTimeKey}
-                >
-                  {startTimeColumnLabels[startTimeKey as keyof typeof startTimeColumnLabels]}
-                </Option>
-              ))}
-            </Select>
-
-            <Select
-              value={{ value: lifecycleFilter, label: currentLifecycleFilterLabel }}
-              labelInValue
-              data-testid='lifecycle-filter'
-              onChange={({ value }) => updateSearchFacets({ lifecycleFilter: value })}
-            >
-              <Select.Option data-testid='active-runs-menu-item' value={LIFECYCLE_FILTER.ACTIVE}>
-                <FormattedMessage
-                  defaultMessage='Active'
-                  description='Linked model dropdown option to show active experiment runs'
-                />
-              </Select.Option>
-              <Select.Option data-testid='deleted-runs-menu-item' value={LIFECYCLE_FILTER.DELETED}>
-                <FormattedMessage
-                  defaultMessage='Deleted'
-                  description='Linked model dropdown option to show deleted experiment runs'
-                />
-              </Select.Option>
-            </Select>
-          </>
-        )}
-
-        {showActionButtons && (
-          <>
-            <Button
-              data-testid='runs-compare-button'
-              disabled={!canCompareRuns}
-              onClick={compareButtonClicked}
-            >
-              <FormattedMessage
-                defaultMessage='Compare'
-                // eslint-disable-next-line max-len
-                description='String for the compare button to compare experiment runs to find an ideal model'
-              />
-            </Button>
-            <Button
-              data-testid='run-rename-button'
-              onClick={renameButtonClicked}
-              disabled={!canRenameRuns}
-            >
-              <FormattedMessage
-                defaultMessage='Rename'
-                description='Label for the rename run button above the experiment runs table'
-              />
-            </Button>
-            {lifecycleFilter === LIFECYCLE_FILTER.ACTIVE ? (
-              <Button
-                data-testid='runs-delete-button'
-                disabled={!canRestoreRuns}
-                onClick={onDeleteRun}
-                danger
-              >
-                <FormattedMessage
-                  defaultMessage='Delete'
-                  // eslint-disable-next-line max-len
-                  description='String for the delete button to delete a particular experiment run'
-                />
-              </Button>
-            ) : null}
-            {lifecycleFilter === LIFECYCLE_FILTER.DELETED ? (
-              <Button
-                data-testid='runs-restore-button'
-                disabled={!canRestoreRuns}
-                onClick={onRestoreRun}
-              >
-                <FormattedMessage
-                  defaultMessage='Restore'
-                  // eslint-disable-next-line max-len
-                  description='String for the restore button to undo the experiments that were deleted'
-                />
-              </Button>
-            ) : null}
-          </>
-        )}
-        <div css={styles.groupSeparator} />
-        <div>
-          <FormattedMessage
-            // eslint-disable-next-line max-len
-            defaultMessage='Showing {length} matching {length, plural, =0 {runs} =1 {run} other {runs}}'
-            // eslint-disable-next-line max-len
-            description='Message for displaying how many runs match search criteria on experiment page'
-            values={{ length: visibleRowsCount }}
-          />
-        </div>
-      </div>
+      </>
     );
   },
 );
 
 const styles = {
-  groupSeparator: () => ({ flex: 1 }),
+  buttonSeparator: (theme: Theme) => ({
+    borderLeft: `1px solid ${theme.colors.border}`,
+    marginLeft: theme.spacing.xs,
+    marginRight: theme.spacing.xs,
+    height: '100%',
+  }),
   controlBar: (theme: Theme) => ({
     display: 'flex',
     gap: theme.spacing.sm,
     alignItems: 'center',
-    paddingTop: theme.spacing.sm,
-    borderTop: `1px solid ${theme.colors.border}`,
   }),
 };

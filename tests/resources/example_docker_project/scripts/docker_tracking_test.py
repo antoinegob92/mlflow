@@ -1,7 +1,9 @@
-""" Example script that calls tracking APIs within / outside of a start_run() block. """
-import mlflow
+"""Example script that calls tracking APIs within / outside of a start_run() block."""
+
 import sys
 import tempfile
+
+import mlflow
 
 
 def call_tracking_apis():

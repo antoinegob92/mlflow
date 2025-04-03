@@ -1,18 +1,14 @@
-import os
-import re
 import difflib
-from pathlib import Path
+import re
 from collections import namedtuple
+from pathlib import Path
 
 import pytest
-from packaging.version import Version
-import sqlalchemy
-from sqlalchemy.schema import MetaData, CreateTable
 from sqlalchemy import create_engine
+from sqlalchemy.schema import CreateTable, MetaData
 
 import mlflow
-from mlflow.tracking._tracking_service.utils import _TRACKING_URI_ENV_VAR
-
+from mlflow.environment_variables import MLFLOW_TRACKING_URI
 
 pytestmark = pytest.mark.notrackingurimock
 
@@ -22,7 +18,7 @@ def get_database_dialect(uri):
 
 
 def get_tracking_uri():
-    return os.getenv(_TRACKING_URI_ENV_VAR)
+    return MLFLOW_TRACKING_URI.get()
 
 
 def dump_schema(db_uri):
@@ -124,12 +120,9 @@ def initialize_database():
 def get_schema_update_command(dialect):
     this_script = Path(__file__).relative_to(Path.cwd())
     docker_compose_yml = this_script.parent / "compose.yml"
-    return f"docker-compose -f {docker_compose_yml} run --rm mlflow-{dialect} python {this_script}"
+    return f"docker compose -f {docker_compose_yml} run --rm mlflow-{dialect} python {this_script}"
 
 
-@pytest.mark.skipif(
-    Version(sqlalchemy.__version__) > Version("1.4"), reason="Use 1.4 for schema check"
-)
 def test_schema_is_up_to_date():
     initialize_database()
     tracking_uri = get_tracking_uri()
@@ -164,7 +157,7 @@ Manually copy & paste the expected schema in {rel_path} or run the following com
 
 def main():
     tracking_uri = get_tracking_uri()
-    assert tracking_uri, f"Environment variable {_TRACKING_URI_ENV_VAR} must be set"
+    assert tracking_uri, f"Environment variable {MLFLOW_TRACKING_URI} must be set"
     get_database_dialect(tracking_uri)  # Ensure `tracking_uri` is a database URI
     mlflow.set_tracking_uri(tracking_uri)
     initialize_database()

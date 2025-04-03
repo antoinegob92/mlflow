@@ -26,20 +26,50 @@ message RegisteredModel {
 
   // Description of this ``registered_model``.
   optional string description = 5;
+
+  // Registered Model Aliases on this model.
+  repeated RegisteredModelAlias aliases = 6;
+
+  // Tags associated with this model.
+  repeated RegisteredModelTag tags = 7;
+}
+
+message RegisteredModelAlias {
+  // The name of the alias
+  optional string alias = 1;
+
+  // Model version number that the alias references.
+  optional string version = 2;
+}
+
+message RegisteredModelTag {
+  // Name (key) of the tag.
+  optional string key = 1;
+
+  // Value of the tag associated with the key, could be empty
+  optional string value = 2;
+}
+
+message ModelVersionTag {
+  // Name (key) of the tag.
+  optional string key = 1;
+
+  // Value of the tag associated with the key, could be empty
+  optional string value = 2;
 }
 
 enum ModelVersionStatus {
   // Unspecified enum value
-  MODEL_VERSION_STATUS_UNSPECIFIED = 0;
+  UNSPECIFIED = 0;
 
   // Request to register a new model version is pending as server performs background tasks.
-  MODEL_VERSION_STATUS_PENDING_REGISTRATION = 1;
+  PENDING_REGISTRATION = 1;
 
   // Request to register a new model version has failed.
-  MODEL_VERSION_STATUS_FAILED_REGISTRATION = 2;
+  FAILED_REGISTRATION = 2;
 
   // Model version is ready for use.
-  MODEL_VERSION_STATUS_READY = 3;
+  READY = 3;
 }
 
 message ModelVersion {
@@ -71,20 +101,29 @@ message ModelVersion {
   // ID of the MLflow experiment containing the MLflow run that generated this model version
   optional string run_experiment_id = 9;
 
-  // ID of the workspace containing the MLflow run that generated this model version
-  optional int64 run_workspace_id = 10 ;
+  // Optional tracking server ID (e.g. Databricks workspace ID) of the source run
+  optional string run_tracking_server_id = 10;
 
   // Current status of ``model_version``
   optional ModelVersionStatus status = 11;
 
   // Details on current ``status``, if it is pending or failed.
   optional string status_message = 12;
+
+  // Current storage location of model version files, e.g. in blob storage
+  optional string storage_location = 13;
+
+  // Registered Model Aliases on this model version.
+  repeated RegisteredModelAlias aliases = 14;
+
+  // Tags associated with this model version.
+  repeated ModelVersionTag tags = 15;
 }
 
 enum ModelVersionOperation {
-  MODEL_VERSION_OPERATION_UNKNOWN = 0;
-  MODEL_VERSION_READ = 1;
-  MODEL_VERSION_READ_WRITE = 2;
+  MODEL_VERSION_OPERATION_UNSPECIFIED = 0;
+  MODEL_VERSION_OPERATION_READ = 1;
+  MODEL_VERSION_OPERATION_READ_WRITE = 2;
 }
 
 // An object encapsulates temporary credentials for cloud API authentication. The temporary
@@ -94,11 +133,16 @@ message TemporaryCredentials {
     AwsCredentials aws_temp_credentials = 2;
     AzureUserDelegationSAS azure_user_delegation_sas = 3;
     GcpOauthToken gcp_oauth_token = 4;
+    R2Credentials r2_temp_credentials = 5;
   }
 
   // Server time when the credential will expire, in epoch milliseconds.
   // The API client is advised to cache the credential given this expiration time.
   optional int64 expiration_time = 1;
+
+  optional StorageMode storage_mode = 6;
+
+  optional EncryptionDetails encryption_details = 7;
 }
 
 // AWS temporary credentials for API authentication.
@@ -127,11 +171,56 @@ message GcpOauthToken {
   optional string oauth_token = 1;
 }
 
+// R2 temporary credentials for API authentication.
+// Read more at https://developers.cloudflare.com/r2/api/s3/tokens/.
+message R2Credentials {
+  // The access key ID that identifies the temporary credentials.
+  optional string access_key_id = 1;
+
+  // The secret access key associated with the access key.
+  optional string secret_access_key = 2;
+
+  // The generated JWT that users must pass to use the temporary credentials.
+  optional string session_token = 3;
+}
+
+enum StorageMode {
+  STORAGE_MODE_UNSPECIFIED = 0;
+  // The storage resources of the workspace are hosted by customers.
+  CUSTOMER_HOSTED = 1;
+  // Default storage
+  DEFAULT_STORAGE = 2;
+}
+
+message EncryptionDetails {
+  oneof encryption_details_type {
+    // Details for CLOUD_MANAGED_SSE_KEYS:
+    SseEncryptionDetails sse_encryption_details = 1;
+  }
+}
+
+enum SseEncryptionAlgorithm {
+  SSE_ENCRYPTION_ALGORITHM_UNSPECIFIED = 0;
+  AWS_SSE_S3 = 1;    // "AES256" in 'x-amz-server-side-encryption' header
+  AWS_SSE_KMS = 2;   // "aws:kms" in x-amz-server-side-encryption' header
+}
+
+message SseEncryptionDetails {
+  optional SseEncryptionAlgorithm algorithm = 1;
+
+  // Optional. The ARN of the SSE-KMS key used with the S3 location, when algorithm = "SSE-KMS".
+  // Sets the value of the 'x-amz-server-side-encryption-aws-kms-key-id' header.
+  optional string aws_kms_key_arn = 2;
+}
+
 message CreateRegisteredModelRequest {
   option (scalapb.message).extends = "com.databricks.rpc.RPC[CreateRegisteredModelResponse]";
 
   // Register models under this name
   optional string name = 1 [(validate_required) = true];
+
+  // Tags associated with registered model.
+  repeated RegisteredModelTag tags = 2;
 
   // Optional description for registered model.
   optional string description = 3;
@@ -146,6 +235,9 @@ message UpdateRegisteredModelRequest {
 
   // Registered model unique name identifier.
   optional string name = 1 [(validate_required) = true];
+
+  // If provided, will rename this ``registered_model`` to the new name provided.
+  optional string new_name = 3;
 
   // If provided, updates the description for this ``registered_model``.
   optional string description = 2;
@@ -194,6 +286,20 @@ message SearchRegisteredModelsResponse {
   optional string next_page_token = 2;
 }
 
+enum DependencyType {
+  DEPENDENCY_TYPE_UNSPECIFIED = 0;
+  DATABRICKS_VECTOR_INDEX = 1;
+  DATABRICKS_MODEL_ENDPOINT = 2;
+  DATABRICKS_UC_FUNCTION = 3;
+  DATABRICKS_UC_CONNECTION = 4;
+  DATABRICKS_TABLE = 5;
+}
+
+message Dependency {
+  optional DependencyType type = 1;
+  optional string name = 2;
+}
+
 message CreateModelVersionRequest {
   option (scalapb.message).extends = "com.databricks.rpc.RPC[CreateModelVersionResponse]";
 
@@ -209,6 +315,18 @@ message CreateModelVersionRequest {
 
   // Optional description for model version.
   optional string description = 4;
+
+  // Optional tracking server ID (e.g. Databricks workspace ID) of the source run
+  optional string run_tracking_server_id = 5;
+
+  // Optional field to list features the model depends on
+  optional string feature_deps = 6;
+
+  // Tags associated with model version.
+  repeated ModelVersionTag tags = 7;
+
+  // Additional dependencies to pass to createModelVersion including VectorSearch and Embedding endpoints
+  repeated Dependency model_version_dependencies = 8;
 }
 
 message CreateModelVersionResponse {
@@ -299,7 +417,7 @@ message GenerateTemporaryModelVersionCredentialsRequest {
 
 message GenerateTemporaryModelVersionCredentialsResponse {
   // Temporary credentials for model version read/write
-  optional TemporaryCredentials credentials = 1 [(json_inline) = true];
+  optional TemporaryCredentials credentials = 1;
 }
 
 message GetModelVersionDownloadUriRequest {
@@ -328,5 +446,203 @@ message FinalizeModelVersionRequest {
 
 
 message FinalizeModelVersionResponse {
+  optional ModelVersion model_version = 1;
 }
 
+message SetRegisteredModelAliasRequest {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[SetRegisteredModelAliasResponse]";
+
+  // Name of the registered model
+  optional string name = 1 [(validate_required) = true];
+
+  // Name of the registered model alias
+  optional string alias = 2 [(validate_required) = true];
+
+  // Model version number that alias will reference
+  optional string version = 3 [(validate_required) = true];
+}
+
+message SetRegisteredModelAliasResponse {
+}
+
+message DeleteRegisteredModelAliasRequest {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[DeleteRegisteredModelAliasResponse]";
+
+  // Name of the registered model
+  optional string name = 1 [(validate_required) = true];
+
+  // Name of the registered model alias
+  optional string alias = 2 [(validate_required) = true];
+}
+
+message DeleteRegisteredModelAliasResponse {
+}
+
+message SetRegisteredModelTagRequest {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[SetRegisteredModelTagResponse]";
+
+  // Name of the registered model
+  optional string name = 1 [(validate_required) = true];
+
+  // Name (key) of the tag
+  optional string key = 2 [(validate_required) = true];
+
+  // Value of the tag associated with the key, could be empty
+  optional string value = 3;
+}
+
+message SetRegisteredModelTagResponse {
+}
+
+message DeleteRegisteredModelTagRequest {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[DeleteRegisteredModelTagResponse]";
+
+  // Name of the registered model
+  optional string name = 1 [(validate_required) = true];
+
+  // Name (key) of the tag
+  optional string key = 2 [(validate_required) = true];
+}
+
+message DeleteRegisteredModelTagResponse {
+}
+
+message SetModelVersionTagRequest {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[SetModelVersionTagResponse]";
+
+  // Name of the registered model
+  optional string name = 1 [(validate_required) = true];
+
+  // Model version number
+  optional string version = 2 [(validate_required) = true];
+
+  // Name (key) of the tag
+  optional string key = 3 [(validate_required) = true];
+
+  // Value of the tag associated with the key, could be empty
+  optional string value = 4;
+}
+
+message SetModelVersionTagResponse {
+}
+
+message DeleteModelVersionTagRequest {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[DeleteModelVersionTagResponse]";
+
+  // Name of the registered model
+  optional string name = 1 [(validate_required) = true];
+
+  // Model version number
+  optional string version = 2 [(validate_required) = true];
+
+  // Name (key) of the tag
+  optional string key = 3 [(validate_required) = true];
+}
+
+message DeleteModelVersionTagResponse {
+}
+
+message GetModelVersionByAliasRequest {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[GetModelVersionByAliasResponse]";
+
+  // Name of the registered model
+  optional string name = 1 [(validate_required) = true];
+
+  // Name of the registered model alias
+  optional string alias = 2 [(validate_required) = true];
+}
+
+message GetModelVersionByAliasResponse {
+  optional ModelVersion model_version = 1;
+}
+
+// Lineage kafka protos
+message Entity {
+  oneof value {
+    Job job = 1;
+    Notebook notebook = 2;
+    Pipeline pipeline = 3;
+  }
+}
+
+message Pipeline {
+  optional string pipeline_id = 1;
+  optional string pipeline_update_id = 2;
+}
+
+message Job {
+  optional string id = 1;
+  optional string task_key = 2;
+  optional string job_run_id = 3;
+  optional string task_run_id = 4;
+}
+
+message Notebook {
+  optional string id = 1;
+  optional string command_id = 2;
+  optional string notebook_run_id = 3;
+}
+
+enum TableType {
+    TABLE = 0;
+    PERSISTED_VIEW = 1;
+    TEMP_VIEW = 2;
+    MATERIALIZED_VIEW = 3;
+    STREAMING_LIVE_TABLE = 4;
+    PATH = 5;
+}
+
+message Table {
+    optional string name = 1;
+    optional TableType table_type = 2;
+    optional string location = 3;
+    optional string table_id = 4;
+}
+
+message Securable {
+    oneof value {
+        Table table = 1;
+    }
+}
+
+message Lineage {
+    optional Securable target_securable = 4;
+    repeated Securable source_securables = 5;
+}
+
+message LineageHeaderInfo {
+  repeated Entity entities = 1;
+  repeated Lineage lineages = 2;
+}
+
+enum ModelVersionLineageDirection {
+  UPSTREAM = 0;
+  DOWNSTREAM = 1;
+}
+
+message ModelVersionLineageInfo {
+  repeated Entity entities = 1;
+  optional ModelVersionLineageDirection direction = 2 [(validate_required) = true];
+}
+
+message EmitModelVersionLineageRequest {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[EmitModelVersionLineageResponse]";
+  // Name of the registered model
+  optional string name = 1 [(validate_required) = true];
+
+  // Model version
+  optional string version = 2 [(validate_required) = true];
+
+  // Model version lineage info
+  optional ModelVersionLineageInfo model_version_lineage_info = 3 [(validate_required) = true];
+}
+
+message EmitModelVersionLineageResponse {}
+
+message IsDatabricksSdkModelsArtifactRepositoryEnabledRequest {
+  option (scalapb.message).extends = "com.databricks.rpc.RPC[IsDatabricksSdkModelsArtifactRepositoryEnabledResponse]";
+}
+
+message IsDatabricksSdkModelsArtifactRepositoryEnabledResponse {
+  optional bool is_databricks_sdk_models_artifact_repository_enabled = 1 [(validate_required) = true];
+}

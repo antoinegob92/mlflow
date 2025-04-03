@@ -7,25 +7,20 @@ from unittest import mock
 import pandas as pd
 import pytest
 
+from mlflow.environment_variables import MLFLOW_RECIPES_EXECUTION_TARGET_STEP_NAME
 from mlflow.recipes import Recipe
+from mlflow.recipes.step import StepStatus
 from mlflow.recipes.steps.ingest import IngestStep
 from mlflow.recipes.steps.split import SplitStep
 from mlflow.recipes.steps.transform import TransformStep
-from mlflow.recipes.step import StepStatus
 from mlflow.recipes.utils.execution import (
-    _get_or_create_execution_directory,
-    run_recipe_step,
-    get_step_output_path,
     _ExecutionPlan,
-    _MLFLOW_RECIPES_EXECUTION_TARGET_STEP_NAME_ENV_VAR,
+    _get_or_create_execution_directory,
+    get_step_output_path,
+    run_recipe_step,
 )
 
-# pylint: disable=unused-import
-from tests.recipes.helper_functions import (
-    BaseStepImplemented,
-    enter_recipe_example_directory,
-    enter_test_recipe_directory,
-)
+from tests.recipes.helper_functions import BaseStepImplemented
 
 
 @pytest.fixture
@@ -44,9 +39,7 @@ def pandas_df():
 
 
 @pytest.fixture
-def test_recipe(
-    enter_test_recipe_directory, pandas_df, tmp_path
-):  # pylint: disable=unused-argument
+def test_recipe(enter_test_recipe_directory, pandas_df, tmp_path):
     dataset_path = tmp_path / "df.parquet"
     pandas_df.to_parquet(dataset_path)
     ingest_step = IngestStep.from_recipe_config(
@@ -104,7 +97,7 @@ def test_recipe(
 
 
 @pytest.fixture(autouse=True)
-def clean_test_recipe(enter_test_recipe_directory):  # pylint: disable=unused-argument
+def clean_test_recipe(enter_test_recipe_directory):
     Recipe(profile="local").clean()
     try:
         yield
@@ -114,7 +107,7 @@ def clean_test_recipe(enter_test_recipe_directory):  # pylint: disable=unused-ar
 
 def test_create_required_step_files(tmp_path):
     class TestStep(BaseStepImplemented):
-        def __init__(self):  # pylint: disable=super-init-not-called
+        def __init__(self):
             pass
 
         @property
@@ -142,7 +135,7 @@ def test_create_required_step_files(tmp_path):
 
 def test_get_or_create_execution_directory_is_idempotent(tmp_path):
     class TestStep(BaseStepImplemented):
-        def __init__(self):  # pylint: disable=super-init-not-called
+        def __init__(self):
             pass
 
         @property
@@ -172,10 +165,13 @@ def test_get_or_create_execution_directory_is_idempotent(tmp_path):
     shutil.rmtree(execution_dir_path_1)
 
     # Simulate a failure with Makefile creation
-    with mock.patch(
-        "mlflow.recipes.utils.execution._create_makefile",
-        side_effect=Exception("Makefile creation failed"),
-    ), pytest.raises(Exception, match="Makefile creation failed"):
+    with (
+        mock.patch(
+            "mlflow.recipes.utils.execution._create_makefile",
+            side_effect=Exception("Makefile creation failed"),
+        ),
+        pytest.raises(Exception, match="Makefile creation failed"),
+    ):
         _get_or_create_execution_directory(
             recipe_root_path=tmp_path, recipe_steps=[test_step], template="regression/v1"
         )
@@ -197,10 +193,13 @@ def test_get_or_create_execution_directory_is_idempotent(tmp_path):
     shutil.rmtree(execution_dir_path_1)
 
     # Simulate a failure with step-specific directory creation
-    with mock.patch(
-        "mlflow.recipes.utils.execution._get_step_output_directory_path",
-        side_effect=Exception("Step directory creation failed"),
-    ), pytest.raises(Exception, match="Step directory creation failed"):
+    with (
+        mock.patch(
+            "mlflow.recipes.utils.execution._get_step_output_directory_path",
+            side_effect=Exception("Step directory creation failed"),
+        ),
+        pytest.raises(Exception, match="Step directory creation failed"),
+    ):
         _get_or_create_execution_directory(
             recipe_root_path=tmp_path, recipe_steps=[test_step], template="regression/v1"
         )
@@ -222,7 +221,7 @@ def test_get_or_create_execution_directory_is_idempotent(tmp_path):
 
 def test_run_recipe_step_sets_environment_as_expected(tmp_path):
     class TestStep1(BaseStepImplemented):
-        def __init__(self):  # pylint: disable=super-init-not-called
+        def __init__(self):
             self.step_config = {}
 
         @property
@@ -234,7 +233,7 @@ def test_run_recipe_step_sets_environment_as_expected(tmp_path):
             return {"A": "B"}
 
     class TestStep2(BaseStepImplemented):
-        def __init__(self):  # pylint: disable=super-init-not-called
+        def __init__(self):
             self.step_config = {}
 
         @property
@@ -245,9 +244,10 @@ def test_run_recipe_step_sets_environment_as_expected(tmp_path):
         def environment(self):
             return {"C": "D"}
 
-    with mock.patch(
-        "mlflow.recipes.utils.execution._exec_cmd"
-    ) as mock_run_in_subprocess, mock.patch("mlflow.recipes.utils.execution._ExecutionPlan"):
+    with (
+        mock.patch("mlflow.recipes.utils.execution._exec_cmd") as mock_run_in_subprocess,
+        mock.patch("mlflow.recipes.utils.execution._ExecutionPlan"),
+    ):
         process = mock.Mock()
         process.stdout.readline = mock.Mock(side_effect="")
         mock_run_in_subprocess.return_value = process
@@ -264,25 +264,24 @@ def test_run_recipe_step_sets_environment_as_expected(tmp_path):
     assert subprocess_call_kwargs.get("extra_env") == {
         "A": "B",
         "C": "D",
-        _MLFLOW_RECIPES_EXECUTION_TARGET_STEP_NAME_ENV_VAR: "test_step_1",
+        MLFLOW_RECIPES_EXECUTION_TARGET_STEP_NAME.name: "test_step_1",
     }
     assert mock_run_in_subprocess.call_count == 2
 
 
 def test_run_recipe_step_calls_execution_plan(tmp_path):
     class TestStep(BaseStepImplemented):
-        def __init__(self):  # pylint: disable=super-init-not-called
+        def __init__(self):
             self.step_config = {}
 
         @property
         def name(self):
             return "test_step"
 
-    with mock.patch(
-        "mlflow.recipes.utils.execution._exec_cmd"
-    ) as mock_run_in_subprocess, mock.patch(
-        "mlflow.recipes.utils.execution._ExecutionPlan"
-    ) as mock_execution_plan:
+    with (
+        mock.patch("mlflow.recipes.utils.execution._exec_cmd") as mock_run_in_subprocess,
+        mock.patch("mlflow.recipes.utils.execution._ExecutionPlan") as mock_execution_plan,
+    ):
         process = mock.Mock()
         process.poll.return_value = 0
         process.stdout.readline = mock.Mock(side_effect="")
@@ -567,15 +566,15 @@ def test_execution_plan():
     plan = _ExecutionPlan(
         "transform",
         [
-            'echo "Run MLFlow Recipe step: ingest"\n',
-            'echo "Run MLFlow Recipe step: split"\n',
-            'echo "Run MLFlow Recipe step: transform"\n',
+            'echo "Run MLflow Recipe step: ingest"\n',
+            'echo "Run MLflow Recipe step: split"\n',
+            'echo "Run MLflow Recipe step: transform"\n',
         ],
         train_subgraph,
     )
     assert plan.steps_cached == []
 
     plan = _ExecutionPlan(
-        "transform", ['echo "Run MLFlow Recipe step: transform"\n'], train_subgraph
+        "transform", ['echo "Run MLflow Recipe step: transform"\n'], train_subgraph
     )
     assert plan.steps_cached == ["ingest", "split"]

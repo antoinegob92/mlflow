@@ -1,10 +1,11 @@
 import os
+import textwrap
 
 import pytest
-import textwrap
 
 from mlflow.exceptions import ExecutionException
 from mlflow.projects import _project_spec
+
 from tests.projects.utils import load_project
 
 
@@ -33,45 +34,48 @@ def test_project_get_unspecified_entry_point():
     assert entry_point.parameters == {}
     entry_point = project.get_entry_point("my_script.sh")
     assert entry_point.name == "my_script.sh"
-    assert entry_point.command == "%s my_script.sh" % os.environ.get("SHELL", "bash")
+    assert entry_point.command == "{} my_script.sh".format(os.environ.get("SHELL", "bash"))
     assert entry_point.parameters == {}
     with pytest.raises(ExecutionException, match="Could not find my_program.scala"):
         project.get_entry_point("my_program.scala")
 
 
 @pytest.mark.parametrize(
-    ("mlproject", "conda_env_path", "conda_env_contents", "mlproject_path"),
+    (
+        # Contents of MLproject file. If None, no MLproject file will be written.
+        "mlproject",
+        # Path to conda environment file. If None, no conda environment file will be written.
+        "conda_env_path",
+        # Contents of conda environment file (written if conda_env_path is not None).
+        "conda_env_contents",
+        # Path to MLproject file. If None, the MLproject file will be written to "MLproject".
+        "mlproject_path",
+    ),
     [
         (None, None, "", None),
         ("key: value", "conda.yaml", "hi", "MLproject"),
         ("conda_env: some-env.yaml", "some-env.yaml", "hi", "mlproject"),
     ],
 )
-def test_load_project(tmpdir, mlproject, conda_env_path, conda_env_contents, mlproject_path):
+def test_load_project(tmp_path, mlproject, conda_env_path, conda_env_contents, mlproject_path):
     """
     Test that we can load a project with various combinations of an MLproject / conda.yaml file
-    :param mlproject: Contents of MLproject file. If None, no MLproject file will be written
-    :param conda_env_path: Path to conda environment file. If None, no conda environment file will
-                           be written.
-    :param conda_env_contents: Contents of conda environment file (written if conda_env_path is
-                               not None)
     """
     if mlproject:
-        tmpdir.join(mlproject_path).write(mlproject)
+        tmp_path.joinpath(mlproject_path).write_text(mlproject)
     if conda_env_path:
-        tmpdir.join(conda_env_path).write(conda_env_contents)
-    project = _project_spec.load_project(tmpdir.strpath)
+        tmp_path.joinpath(conda_env_path).write_text(conda_env_contents)
+    project = _project_spec.load_project(str(tmp_path))
     assert project._entry_points == {}
-    expected_env_path = (
-        os.path.abspath(os.path.join(tmpdir.strpath, conda_env_path)) if conda_env_path else None
-    )
+    expected_env_path = str(tmp_path.joinpath(conda_env_path)) if conda_env_path else None
     assert project.env_config_path == expected_env_path
     if conda_env_path:
-        assert open(project.env_config_path).read() == conda_env_contents
+        with open(project.env_config_path) as f:
+            assert f.read() == conda_env_contents
 
 
-def test_load_docker_project(tmpdir):
-    tmpdir.join("MLproject").write(
+def test_load_docker_project(tmp_path):
+    tmp_path.joinpath("MLproject").write_text(
         textwrap.dedent(
             """
     docker_env:
@@ -79,7 +83,7 @@ def test_load_docker_project(tmpdir):
     """
         )
     )
-    project = _project_spec.load_project(tmpdir.strpath)
+    project = _project_spec.load_project(str(tmp_path))
     assert project._entry_points == {}
     assert project.env_config_path is None
     assert project.docker_env.get("image") == "some-image"
@@ -118,8 +122,8 @@ def test_load_virtualenv_project(tmp_path):
         ),
     ],
 )
-def test_load_invalid_project(tmpdir, invalid_project_contents, expected_error_msg):
-    tmpdir.join("MLproject").write(invalid_project_contents)
+def test_load_invalid_project(tmp_path, invalid_project_contents, expected_error_msg):
+    tmp_path.joinpath("MLproject").write_text(invalid_project_contents)
     with pytest.raises(ExecutionException, match=expected_error_msg) as e:
-        _project_spec.load_project(tmpdir.strpath)
+        _project_spec.load_project(str(tmp_path))
     assert expected_error_msg in str(e.value)

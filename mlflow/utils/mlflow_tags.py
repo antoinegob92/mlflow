@@ -10,6 +10,7 @@ MLFLOW_EXPERIMENT_SOURCE_TYPE = "mlflow.experiment.sourceType"
 MLFLOW_RUN_NAME = "mlflow.runName"
 MLFLOW_RUN_NOTE = "mlflow.note.content"
 MLFLOW_PARENT_RUN_ID = "mlflow.parentRunId"
+MLFLOW_ARTIFACT_LOCATION = "mlflow.artifactLocation"
 MLFLOW_USER = "mlflow.user"
 MLFLOW_SOURCE_TYPE = "mlflow.source.type"
 MLFLOW_RECIPE_TEMPLATE_NAME = "mlflow.pipeline.template.name"
@@ -26,6 +27,10 @@ MLFLOW_DOCKER_IMAGE_URI = "mlflow.docker.image.uri"
 MLFLOW_DOCKER_IMAGE_ID = "mlflow.docker.image.id"
 # Indicates that an MLflow run was created by an autologging integration
 MLFLOW_AUTOLOGGING = "mlflow.autologging"
+# Indicates the artifacts type and path that are logged
+MLFLOW_LOGGED_ARTIFACTS = "mlflow.loggedArtifacts"
+MLFLOW_LOGGED_IMAGES = "mlflow.loggedImages"
+MLFLOW_RUN_SOURCE_TYPE = "mlflow.runSourceType"
 
 MLFLOW_DATABRICKS_NOTEBOOK_ID = "mlflow.databricks.notebookID"
 MLFLOW_DATABRICKS_NOTEBOOK_PATH = "mlflow.databricks.notebookPath"
@@ -57,6 +62,9 @@ MLFLOW_DATABRICKS_GIT_REPO_REFERENCE = "mlflow.databricks.gitRepoReference"
 MLFLOW_DATABRICKS_GIT_REPO_REFERENCE_TYPE = "mlflow.databricks.gitRepoReferenceType"
 MLFLOW_DATABRICKS_GIT_REPO_STATUS = "mlflow.databricks.gitRepoStatus"
 
+# For MLflow Dataset tracking
+MLFLOW_DATASET_CONTEXT = "mlflow.data.context"
+
 MLFLOW_PROJECT_BACKEND = "mlflow.project.backend"
 
 # The following legacy tags are deprecated and will be removed by MLflow 1.0.
@@ -66,6 +74,25 @@ LEGACY_MLFLOW_GIT_REPO_URL = "mlflow.gitRepoURL"  # Replaced with mlflow.source.
 MLFLOW_EXPERIMENT_PRIMARY_METRIC_NAME = "mlflow.experiment.primaryMetric.name"
 MLFLOW_EXPERIMENT_PRIMARY_METRIC_GREATER_IS_BETTER = (
     "mlflow.experiment.primaryMetric.greaterIsBetter"
+)
+
+# For automatic model checkpointing
+LATEST_CHECKPOINT_ARTIFACT_TAG_KEY = "mlflow.latest_checkpoint_artifact"
+
+# A set of tags that cannot be updated by the user
+IMMUTABLE_TAGS = {MLFLOW_USER, MLFLOW_ARTIFACT_LOCATION}
+
+# The list of tags generated from resolve_tags() that are required for tracing UI
+TRACE_RESOLVE_TAGS_ALLOWLIST = (
+    MLFLOW_DATABRICKS_NOTEBOOK_COMMAND_ID,
+    MLFLOW_DATABRICKS_NOTEBOOK_ID,
+    MLFLOW_DATABRICKS_NOTEBOOK_PATH,
+    MLFLOW_DATABRICKS_WEBAPP_URL,
+    MLFLOW_DATABRICKS_WORKSPACE_ID,
+    MLFLOW_DATABRICKS_WORKSPACE_URL,
+    MLFLOW_SOURCE_NAME,
+    MLFLOW_SOURCE_TYPE,
+    MLFLOW_USER,
 )
 
 

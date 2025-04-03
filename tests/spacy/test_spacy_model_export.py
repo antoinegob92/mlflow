@@ -1,38 +1,37 @@
+import json
 import os
-from pathlib import Path
 import random
 from collections import namedtuple
-from packaging.version import Version
+from pathlib import Path
 from unittest import mock
 
 import pandas as pd
 import pytest
 import spacy
-import json
 import yaml
+from packaging.version import Version
+from sklearn.datasets import fetch_20newsgroups
 from spacy.util import compounding, minibatch
 
-import mlflow.spacy
-from sklearn.datasets import fetch_20newsgroups
-
-from mlflow import pyfunc
 import mlflow.pyfunc.scoring_server as pyfunc_scoring_server
+import mlflow.spacy
+from mlflow import pyfunc
 from mlflow.exceptions import MlflowException
 from mlflow.models import Model, infer_signature
-from mlflow.models.utils import _read_example
+from mlflow.models.utils import _read_example, load_serving_example
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
 from mlflow.utils.environment import _mlflow_conda_env
 from mlflow.utils.file_utils import TempDir
 from mlflow.utils.model_utils import _get_flavor_configuration
-from tests.conftest import tracking_uri_mock  # pylint: disable=unused-import, E0611
+
 from tests.helper_functions import (
-    pyfunc_serve_and_score_model,
-    _compare_conda_env_requirements,
     _assert_pip_requirements,
-    _is_available_on_pypi,
-    allow_infer_pip_requirements_fallback_if,
+    _compare_conda_env_requirements,
     _compare_logged_code_paths,
+    _is_available_on_pypi,
     _mlflow_major_version_string,
+    allow_infer_pip_requirements_fallback_if,
+    pyfunc_serve_and_score_model,
 )
 
 EXTRA_PYFUNC_SERVING_TEST_ARGS = (
@@ -83,15 +82,15 @@ def spacy_model_with_data():
 
 
 @pytest.fixture
-def spacy_custom_env(tmpdir):
-    conda_env = os.path.join(str(tmpdir), "conda_env.yml")
+def spacy_custom_env(tmp_path):
+    conda_env = os.path.join(tmp_path, "conda_env.yml")
     _mlflow_conda_env(conda_env, additional_pip_deps=["pytest", "spacy"])
     return conda_env
 
 
 @pytest.fixture
-def model_path(tmpdir):
-    return os.path.join(str(tmpdir), "model")
+def model_path(tmp_path):
+    return os.path.join(tmp_path, "model")
 
 
 def test_model_save_load(spacy_model_with_data, model_path):
@@ -126,7 +125,11 @@ def test_model_export_with_schema_and_examples(spacy_model_with_data):
                     spacy_model, path=path, signature=signature, input_example=example
                 )
                 mlflow_model = Model.load(path)
-                assert signature == mlflow_model.signature
+                if signature is not None or example is None:
+                    assert signature == mlflow_model.signature
+                else:
+                    # signature is inferred from input_example
+                    assert mlflow_model.signature is not None
                 if example is None:
                     assert mlflow_model.saved_input_example_info is None
                 else:
@@ -147,7 +150,7 @@ def test_predict_df_with_wrong_shape(spacy_model_with_data, model_path):
         )
 
 
-def test_model_log(spacy_model_with_data, tracking_uri_mock):  # pylint: disable=unused-argument
+def test_model_log(spacy_model_with_data, tracking_uri_mock):
     spacy_model = spacy_model_with_data.model
     old_uri = mlflow.get_tracking_uri()
     # should_start_run tests whether or not calling log_model() automatically starts a run.
@@ -157,12 +160,8 @@ def test_model_log(spacy_model_with_data, tracking_uri_mock):  # pylint: disable
                 artifact_path = "model"
                 if should_start_run:
                     mlflow.start_run()
-                model_info = mlflow.spacy.log_model(
-                    spacy_model=spacy_model, artifact_path=artifact_path
-                )
-                model_uri = "runs:/{run_id}/{artifact_path}".format(
-                    run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-                )
+                model_info = mlflow.spacy.log_model(spacy_model, artifact_path)
+                model_uri = model_info.model_uri
                 assert model_info.model_uri == model_uri
 
                 # Load model
@@ -187,69 +186,67 @@ def test_model_save_persists_requirements_in_mlflow_model_directory(
     _compare_conda_env_requirements(spacy_custom_env, saved_pip_req_path)
 
 
-def test_save_model_with_pip_requirements(spacy_model_with_data, tmpdir):
+def test_save_model_with_pip_requirements(spacy_model_with_data, tmp_path):
     expected_mlflow_version = _mlflow_major_version_string()
     # Path to a requirements file
-    tmpdir1 = tmpdir.join("1")
-    req_file = tmpdir.join("requirements.txt")
-    req_file.write("a")
-    mlflow.spacy.save_model(
-        spacy_model_with_data.model, tmpdir1.strpath, pip_requirements=req_file.strpath
-    )
-    _assert_pip_requirements(tmpdir1.strpath, [expected_mlflow_version, "a"], strict=True)
+    tmpdir1 = tmp_path.joinpath("1")
+    req_file = tmp_path.joinpath("requirements.txt")
+    req_file.write_text("a")
+    mlflow.spacy.save_model(spacy_model_with_data.model, tmpdir1, pip_requirements=str(req_file))
+    _assert_pip_requirements(tmpdir1, [expected_mlflow_version, "a"], strict=True)
 
     # List of requirements
-    tmpdir2 = tmpdir.join("2")
+    tmpdir2 = tmp_path.joinpath("2")
     mlflow.spacy.save_model(
         spacy_model_with_data.model,
-        tmpdir2.strpath,
-        pip_requirements=[f"-r {req_file.strpath}", "b"],
+        tmpdir2,
+        pip_requirements=[f"-r {req_file}", "b"],
     )
-    _assert_pip_requirements(tmpdir2.strpath, [expected_mlflow_version, "a", "b"], strict=True)
+    _assert_pip_requirements(tmpdir2, [expected_mlflow_version, "a", "b"], strict=True)
 
     # Constraints file
-    tmpdir3 = tmpdir.join("3")
+    tmpdir3 = tmp_path.joinpath("3")
     mlflow.spacy.save_model(
         spacy_model_with_data.model,
-        tmpdir3.strpath,
-        pip_requirements=[f"-c {req_file.strpath}", "b"],
+        tmpdir3,
+        pip_requirements=[f"-c {req_file}", "b"],
     )
     _assert_pip_requirements(
-        tmpdir3.strpath, [expected_mlflow_version, "b", "-c constraints.txt"], ["a"], strict=True
+        tmpdir3, [expected_mlflow_version, "b", "-c constraints.txt"], ["a"], strict=True
     )
 
 
-def test_save_model_with_extra_pip_requirements(spacy_model_with_data, tmpdir):
+def test_save_model_with_extra_pip_requirements(spacy_model_with_data, tmp_path):
     expected_mlflow_version = _mlflow_major_version_string()
     default_reqs = mlflow.spacy.get_default_pip_requirements()
 
     # Path to a requirements file
-    tmpdir1 = tmpdir.join("1")
-    req_file = tmpdir.join("requirements.txt")
-    req_file.write("a")
+    tmpdir1 = tmp_path.joinpath("1")
+    req_file = tmp_path.joinpath("requirements.txt")
+    req_file.write_text("a")
     mlflow.spacy.save_model(
-        spacy_model_with_data.model, tmpdir1.strpath, extra_pip_requirements=req_file.strpath
+        spacy_model_with_data.model, tmpdir1, extra_pip_requirements=str(req_file)
     )
-    _assert_pip_requirements(tmpdir1.strpath, [expected_mlflow_version, *default_reqs, "a"])
+    _assert_pip_requirements(tmpdir1, [expected_mlflow_version, *default_reqs, "a"])
 
     # List of requirements
-    tmpdir2 = tmpdir.join("2")
+    tmpdir2 = tmp_path.joinpath("2")
     mlflow.spacy.save_model(
         spacy_model_with_data.model,
-        tmpdir2.strpath,
-        extra_pip_requirements=[f"-r {req_file.strpath}", "b"],
+        tmpdir2,
+        extra_pip_requirements=[f"-r {req_file}", "b"],
     )
-    _assert_pip_requirements(tmpdir2.strpath, [expected_mlflow_version, *default_reqs, "a", "b"])
+    _assert_pip_requirements(tmpdir2, [expected_mlflow_version, *default_reqs, "a", "b"])
 
     # Constraints file
-    tmpdir3 = tmpdir.join("3")
+    tmpdir3 = tmp_path.joinpath("3")
     mlflow.spacy.save_model(
         spacy_model_with_data.model,
-        tmpdir3.strpath,
-        extra_pip_requirements=[f"-c {req_file.strpath}", "b"],
+        tmpdir3,
+        extra_pip_requirements=[f"-c {req_file}", "b"],
     )
     _assert_pip_requirements(
-        tmpdir3.strpath, [expected_mlflow_version, *default_reqs, "b", "-c constraints.txt"], ["a"]
+        tmpdir3, [expected_mlflow_version, *default_reqs, "b", "-c constraints.txt"], ["a"]
     )
 
 
@@ -293,16 +290,12 @@ def test_model_log_persists_specified_conda_env_in_mlflow_model_directory(
 ):
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.spacy.log_model(
-            spacy_model=spacy_model_with_data.model,
-            artifact_path=artifact_path,
+        model_info = mlflow.spacy.log_model(
+            spacy_model_with_data.model,
+            artifact_path,
             conda_env=spacy_custom_env,
         )
-        model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-        )
+        model_path = _download_artifact_from_uri(model_info.model_uri)
 
     pyfunc_conf = _get_flavor_configuration(model_path=model_path, flavor_name=pyfunc.FLAVOR_NAME)
     saved_conda_env_path = os.path.join(model_path, pyfunc_conf[pyfunc.ENV]["conda"])
@@ -321,16 +314,12 @@ def test_model_log_persists_requirements_in_mlflow_model_directory(
 ):
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.spacy.log_model(
-            spacy_model=spacy_model_with_data.model,
-            artifact_path=artifact_path,
+        model_info = mlflow.spacy.log_model(
+            spacy_model_with_data.model,
+            artifact_path,
             conda_env=spacy_custom_env,
         )
-        model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-        )
+        model_path = _download_artifact_from_uri(model_info.model_uri)
 
     saved_pip_req_path = os.path.join(model_path, "requirements.txt")
     _compare_conda_env_requirements(spacy_custom_env, saved_pip_req_path)
@@ -348,22 +337,16 @@ def test_model_log_without_specified_conda_env_uses_default_env_with_expected_de
 ):
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.spacy.log_model(spacy_model=spacy_model_with_data.model, artifact_path=artifact_path)
-        model_uri = mlflow.get_artifact_uri(artifact_path)
-    _assert_pip_requirements(model_uri, mlflow.spacy.get_default_pip_requirements())
+        model_info = mlflow.spacy.log_model(spacy_model_with_data.model, artifact_path)
+    _assert_pip_requirements(model_info.model_uri, mlflow.spacy.get_default_pip_requirements())
 
 
 def test_model_log_with_pyfunc_flavor(spacy_model_with_data):
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.spacy.log_model(spacy_model=spacy_model_with_data.model, artifact_path=artifact_path)
-        model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-        )
+        model_info = mlflow.spacy.log_model(spacy_model_with_data.model, artifact_path)
 
-        loaded_model = Model.load(model_path)
+        loaded_model = Model.load(model_info.model_uri)
         assert pyfunc.FLAVOR_NAME in loaded_model.flavors
 
 
@@ -383,12 +366,8 @@ def test_model_log_without_pyfunc_flavor():
 
     # Ensure the pyfunc flavor is not present after logging and loading the model
     with mlflow.start_run():
-        mlflow.spacy.log_model(spacy_model=nlp, artifact_path=artifact_path)
-        model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-        )
+        model_info = mlflow.spacy.log_model(nlp, artifact_path)
+        model_path = _download_artifact_from_uri(model_info.model_uri)
 
         loaded_model = Model.load(model_path)
         assert loaded_model.flavors.keys() == {"spacy"}
@@ -398,18 +377,23 @@ def test_pyfunc_serve_and_score(spacy_model_with_data):
     model, inference_dataframe = spacy_model_with_data
     artifact_path = "model"
     with mlflow.start_run():
-        if spacy_version <= Version("3.0.8"):
-            extra_pip_requirements = ["click<8.1.0", "flask<2.1.0"]
+        if spacy_version <= Version("3.0.9"):
+            extra_pip_requirements = ["click<8.1.0", "flask<2.1.0", "werkzeug<3"]
         elif spacy_version < Version("3.2.4"):
             extra_pip_requirements = ["click<8.1.0"]
         else:
             extra_pip_requirements = None
-        mlflow.spacy.log_model(model, artifact_path, extra_pip_requirements=extra_pip_requirements)
-        model_uri = mlflow.get_artifact_uri(artifact_path)
+        model_info = mlflow.spacy.log_model(
+            model,
+            artifact_path,
+            extra_pip_requirements=extra_pip_requirements,
+            input_example=inference_dataframe,
+        )
 
+    inference_payload = load_serving_example(model_info.model_uri)
     resp = pyfunc_serve_and_score_model(
-        model_uri,
-        data=inference_dataframe,
+        model_info.model_uri,
+        data=inference_payload,
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
@@ -419,13 +403,15 @@ def test_pyfunc_serve_and_score(spacy_model_with_data):
 
 def test_log_model_with_code_paths(spacy_model_with_data):
     artifact_path = "model"
-    with mlflow.start_run(), mock.patch(
-        "mlflow.spacy._add_code_from_conf_to_system_path"
-    ) as add_mock:
-        mlflow.spacy.log_model(spacy_model_with_data.model, artifact_path, code_paths=[__file__])
-        model_uri = mlflow.get_artifact_uri(artifact_path)
-        _compare_logged_code_paths(__file__, model_uri, mlflow.spacy.FLAVOR_NAME)
-        mlflow.spacy.load_model(model_uri)
+    with (
+        mlflow.start_run(),
+        mock.patch("mlflow.spacy._add_code_from_conf_to_system_path") as add_mock,
+    ):
+        model_info = mlflow.spacy.log_model(
+            spacy_model_with_data.model, artifact_path, code_paths=[__file__]
+        )
+        _compare_logged_code_paths(__file__, model_info.model_uri, mlflow.spacy.FLAVOR_NAME)
+        mlflow.spacy.load_model(model_info.model_uri)
         add_mock.assert_called()
 
 
@@ -487,12 +473,11 @@ def test_model_log_with_metadata(spacy_model_with_data):
     artifact_path = "model"
 
     with mlflow.start_run():
-        mlflow.spacy.log_model(
+        model_info = mlflow.spacy.log_model(
             spacy_model_with_data.model,
-            artifact_path=artifact_path,
+            artifact_path,
             metadata={"metadata_key": "metadata_value"},
         )
-        model_uri = mlflow.get_artifact_uri(artifact_path)
 
-    reloaded_model = mlflow.pyfunc.load_model(model_uri=model_uri)
+    reloaded_model = mlflow.pyfunc.load_model(model_uri=model_info.model_uri)
     assert reloaded_model.metadata.metadata["metadata_key"] == "metadata_value"

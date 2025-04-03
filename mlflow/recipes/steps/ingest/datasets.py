@@ -1,4 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import importlib
 import logging
 import os
@@ -6,33 +5,33 @@ import pathlib
 import posixpath
 import sys
 from abc import abstractmethod
-from typing import Dict, Any, List, TypeVar, Optional, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Optional, Union
 from urllib.parse import urlparse
 
 from mlflow.artifacts import download_artifacts
 from mlflow.exceptions import MlflowException
-from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, BAD_REQUEST
+from mlflow.protos.databricks_pb2 import BAD_REQUEST, INVALID_PARAMETER_VALUE
 from mlflow.store.artifact.artifact_repo import (
     _NUM_DEFAULT_CPUS,
-    _NUM_MAX_THREADS_PER_CPU,
     _NUM_MAX_THREADS,
+    _NUM_MAX_THREADS_PER_CPU,
+)
+from mlflow.utils._spark_utils import (
+    _create_local_spark_session_for_recipes,
+    _get_active_spark_session,
 )
 from mlflow.utils.file_utils import (
     TempDir,
+    download_file_using_http_uri,
     get_local_path_or_none,
     local_file_uri_to_path,
-    write_pandas_df_as_parquet,
     read_parquet_as_pandas_df,
-    download_file_using_http_uri,
-)
-from mlflow.utils._spark_utils import (
-    _get_active_spark_session,
-    _create_local_spark_session_for_recipes,
+    write_pandas_df_as_parquet,
 )
 
 _logger = logging.getLogger(__name__)
 
-_DatasetType = TypeVar("_Dataset")
 
 _USER_DEFINED_INGEST_STEP_MODULE = "steps.ingest"
 
@@ -44,7 +43,8 @@ class _Dataset:
 
     def __init__(self, dataset_format: str):
         """
-        :param dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
+        Args:
+            dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
         """
         self.dataset_format = dataset_format
 
@@ -53,22 +53,25 @@ class _Dataset:
         """
         Fetches the dataset, converts it to parquet, and stores it at the specified `dst_path`.
 
-        :param dst_path: The local filesystem path at which to store the resolved parquet dataset
-                         (e.g. `<execution_directory_path>/steps/ingest/outputs/dataset.parquet`).
+        Args:
+            dst_path: The local filesystem path at which to store the resolved parquet dataset
+                (e.g. `<execution_directory_path>/steps/ingest/outputs/dataset.parquet`).
         """
-        pass
 
     @classmethod
-    def from_config(cls, dataset_config: Dict[str, Any], recipe_root: str) -> _DatasetType:
+    def from_config(cls, dataset_config: dict[str, Any], recipe_root: str) -> "_Dataset":
         """
         Constructs a dataset instance from the specified dataset configuration
         and recipe root path.
 
-        :param dataset_config: Dictionary representation of the recipe dataset configuration
-                               (i.e. the `data` section of recipe.yaml).
-        :param recipe_root: The absolute path of the associated recipe root directory on the
-                              local filesystem.
-        :return: A `_Dataset` instance representing the configured dataset.
+        Args:
+            dataset_config: Dictionary representation of the recipe dataset configuration
+                (i.e. the `data` section of recipe.yaml).
+            recipe_root: The absolute path of the associated recipe root directory on the
+                local filesystem.
+
+        Returns:
+            A `_Dataset` instance representing the configured dataset.
         """
         if not cls.handles_format(dataset_config.get("using")):
             raise MlflowException(
@@ -79,18 +82,20 @@ class _Dataset:
 
     @classmethod
     @abstractmethod
-    def _from_config(cls, dataset_config, recipe_root) -> _DatasetType:
+    def _from_config(cls, dataset_config, recipe_root) -> "_Dataset":
         """
         Constructs a dataset instance from the specified dataset configuration
         and recipe root path.
 
-        :param dataset_config: Dictionary representation of the recipe dataset configuration
-                               (i.e. the `data` section of recipe.yaml).
-        :param recipe_root: The absolute path of the associated recipe root directory on the
-                              local filesystem.
-        :return: A `_Dataset` instance representing the configured dataset.
+        Args:
+            dataset_config: Dictionary representation of the recipe dataset configuration
+                (i.e. the `data` section of recipe.yaml).
+            recipe_root: The absolute path of the associated recipe root directory on the
+                local filesystem.
+
+        Returns:
+            A `_Dataset` instance representing the configured dataset.
         """
-        pass
 
     @staticmethod
     @abstractmethod
@@ -99,23 +104,28 @@ class _Dataset:
         Determines whether or not the dataset class is a compatible representation of the
         specified dataset format.
 
-        :param dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
-        :return: `True` if the dataset class is a compatible representation of the specified
-                 dataset format, `False` otherwise.
+        Args:
+            dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
+
+        Returns:
+            `True` if the dataset class is a compatible representation of the specified
+            dataset format, `False` otherwise.
         """
-        pass
 
     @classmethod
-    def _get_required_config(cls, dataset_config: Dict[str, Any], key: str) -> Any:
+    def _get_required_config(cls, dataset_config: dict[str, Any], key: str) -> Any:
         """
         Obtains the value associated with the specified dataset configuration key, first verifying
         that the key is present in the config and throwing if it is not.
 
-        :param dataset_config: Dictionary representation of the recipe dataset configuration
-                               (i.e. the `data` section of recipe.yaml).
-        :param key: The key within the dataset configuration for which to fetch the associated
-                    value.
-        :return: The value associated with the specified configuration key.
+        Args:
+            dataset_config: Dictionary representation of the recipe dataset configuration
+                (i.e. the `data` section of recipe.yaml).
+            key: The key within the dataset configuration for which to fetch the associated
+                value.
+
+        Returns:
+            The value associated with the specified configuration key.
         """
         try:
             return dataset_config[key]
@@ -133,23 +143,24 @@ class _LocationBasedDataset(_Dataset):
 
     def __init__(
         self,
-        location: Union[str, List[str]],
+        location: Union[str, list[str]],
         dataset_format: str,
         recipe_root: str,
     ):
         """
-        :param location: The location of the dataset
-                         (one dataset as a string or list of multiple datasets)
-                         (e.g. '/tmp/myfile.parquet', './mypath', 's3://mybucket/mypath',
-                         or YAML list:
-                            location:
-                                - http://www.myserver.com/dataset/df1.csv
-                                - http://www.myserver.com/dataset/df1.csv
-                        )
+        Args:
+            location: The location of the dataset (one dataset as a string or list of multiple
+                datasets)
+                (e.g. '/tmp/myfile.parquet', './mypath', 's3://mybucket/mypath', or YAML list:
+                    location:
+                        - http://www.myserver.com/dataset/df1.csv
+                        - http://www.myserver.com/dataset/df1.csv
+                )
 
-        :param dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
-        :param recipe_root: The absolute path of the associated recipe root directory on the
-                              local filesystem.
+            dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
+
+            recipe_root: The absolute path of the associated recipe root directory on the local
+                filesystem.
         """
         super().__init__(dataset_format=dataset_format)
         self.location = (
@@ -164,7 +175,7 @@ class _LocationBasedDataset(_Dataset):
         pass
 
     @classmethod
-    def _from_config(cls, dataset_config: Dict[str, Any], recipe_root: str) -> _DatasetType:
+    def _from_config(cls, dataset_config: dict[str, Any], recipe_root: str) -> "_Dataset":
         return cls(
             location=cls._get_required_config(dataset_config=dataset_config, key="location"),
             recipe_root=recipe_root,
@@ -173,8 +184,8 @@ class _LocationBasedDataset(_Dataset):
 
     @staticmethod
     def _sanitize_local_dataset_multiple_locations_if_necessary(
-        dataset_location: Union[str, List[str]], recipe_root: str
-    ) -> List[str]:
+        dataset_location: Union[str, list[str]], recipe_root: str
+    ) -> list[str]:
         if isinstance(dataset_location, str):
             return [
                 _LocationBasedDataset._sanitize_local_dataset_location_if_necessary(
@@ -199,10 +210,13 @@ class _LocationBasedDataset(_Dataset):
         Checks whether or not the specified `dataset_location` is a local filesystem location and,
         if it is, converts it to an absolute path if it is not already absolute.
 
-        :param dataset_location: The dataset location from the recipe dataset configuration.
-        :param recipe_root: The absolute path of the recipe root directory on the local
-                              filesystem.
-        :return: The sanitized dataset location.
+        Args:
+            dataset_location: The dataset location from the recipe dataset configuration.
+            recipe_root: The absolute path of the recipe root directory on the local
+                filesystem.
+
+        Returns:
+            The sanitized dataset location.
         """
         local_dataset_path_or_none = get_local_path_or_none(path_or_uri=dataset_location)
         if local_dataset_path_or_none is None:
@@ -284,7 +298,7 @@ class _DownloadThenConvertDataset(_LocationBasedDataset):
             )
 
     @staticmethod
-    def _download_dataset(dataset_location: List[str], dst_path: str):
+    def _download_dataset(dataset_location: list[str], dst_path: str):
         dest_locations = _DownloadThenConvertDataset._download_all_datasets_in_parallel(
             dataset_location, dst_path
         )
@@ -342,17 +356,18 @@ class _DownloadThenConvertDataset(_LocationBasedDataset):
             return download_artifacts(artifact_uri=dataset_location, dst_path=dst_path)
 
     @abstractmethod
-    def _convert_to_parquet(self, dataset_file_paths: List[str], dst_path: str):
+    def _convert_to_parquet(self, dataset_file_paths: list[str], dst_path: str):
         """
         Converts the specified dataset files to parquet format and aggregates them together,
         writing the consolidated parquet file to the specified destination path.
 
-        :param dataset_file_paths: A list of local filesystem of dataset files to convert to
-                                   parquet format.
-        :param dst_path: The local filesystem path at which to store the resolved parquet dataset
-                         (e.g. `<execution_directory_path>/steps/ingest/outputs/dataset.parquet`).
+        Args:
+            dataset_file_paths: A list of local filesystem of dataset files to convert to
+                parquet format.
+            dst_path: The local filesystem path at which to store the resolved parquet dataset
+                (e.g. `<execution_directory_path>/steps/ingest/outputs/dataset.parquet`).
+
         """
-        pass
 
 
 class _PandasConvertibleDataset(_DownloadThenConvertDataset):
@@ -361,7 +376,7 @@ class _PandasConvertibleDataset(_DownloadThenConvertDataset):
     parquet using a series of Pandas DataFrame ``read_*`` and ``concat`` operations.
     """
 
-    def _convert_to_parquet(self, dataset_file_paths: List[str], dst_path: str):
+    def _convert_to_parquet(self, dataset_file_paths: list[str], dst_path: str):
         import pandas as pd
 
         aggregated_dataframe = None
@@ -383,10 +398,13 @@ class _PandasConvertibleDataset(_DownloadThenConvertDataset):
         """
         Loads the specified file as a Pandas DataFrame.
 
-        :param local_data_file_path: The local filesystem path of the file to load.
-        :return: A Pandas DataFrame representation of the specified file.
+        Args:
+            local_data_file_path: The local filesystem path of the file to load.
+
+        Returns:
+            A Pandas DataFrame representation of the specified file.
+
         """
-        pass
 
     @staticmethod
     @abstractmethod
@@ -422,13 +440,14 @@ class CustomDataset(_PandasConvertibleDataset):
         recipe_root: str,
     ):
         """
-        :param location: The location of the dataset
-                         (e.g. '/tmp/myfile.parquet', './mypath', 's3://mybucket/mypath', ...).
-        :param dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
-        :param loader_method: The custom loader method used to load and convert the dataset
-                              to parquet format, e.g.`load_file_as_dataframe`.
-        :param recipe_root: The absolute path of the associated recipe root directory on the
-                              local filesystem.
+        Args:
+            location: The location of the dataset
+                (e.g. '/tmp/myfile.parquet', './mypath', 's3://mybucket/mypath', ...).
+            dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
+            loader_method: The custom loader method used to load and convert the dataset
+                to parquet format, e.g.`load_file_as_dataframe`.
+            recipe_root: The absolute path of the associated recipe root directory on the
+                local filesystem.
         """
         super().__init__(
             location=location,
@@ -446,7 +465,7 @@ class CustomDataset(_PandasConvertibleDataset):
             raise MlflowException(
                 message=(
                     "The `ingested_data` is not a DataFrame, please make sure "
-                    f"'{_USER_DEFINED_INGEST_STEP_MODULE}.{self.loader_method}'"
+                    f"'{_USER_DEFINED_INGEST_STEP_MODULE}.{self.loader_method}' "
                     "returns a Pandas DataFrame object."
                 ),
                 error_code=INVALID_PARAMETER_VALUE,
@@ -498,7 +517,7 @@ class CustomDataset(_PandasConvertibleDataset):
             ) from e
 
     @classmethod
-    def _from_config(cls, dataset_config: Dict[str, Any], recipe_root: str) -> _DatasetType:
+    def _from_config(cls, dataset_config: dict[str, Any], recipe_root: str) -> "_Dataset":
         return cls(
             location=cls._get_required_config(dataset_config=dataset_config, key="location"),
             dataset_format=cls._get_required_config(dataset_config=dataset_config, key="using"),
@@ -519,11 +538,23 @@ class _SparkDatasetMixin:
     and conversion to parquet format.
     """
 
+    def _convert_spark_df_to_pandas(self, spark_df):
+        import pandas as pd
+
+        datetime_cols = [
+            field.name for field in spark_df.schema.fields if str(field.dataType) == "DateType"
+        ]
+        pandas_df = spark_df.toPandas()
+        pandas_df[datetime_cols] = pandas_df[datetime_cols].apply(pd.to_datetime, errors="coerce")
+
+        return pandas_df
+
     def _get_or_create_spark_session(self):
         """
         Obtains the active Spark session, throwing if a session does not exist.
 
-        :return: The active Spark session.
+        Returns:
+            The active Spark session.
         """
         try:
             spark_session = _get_active_spark_session()
@@ -558,13 +589,14 @@ class DeltaTableDataset(_SparkDatasetMixin, _LocationBasedDataset):
         timestamp: Optional[str] = None,
     ):
         """
-        :param location: The location of the dataset
-                         (e.g. '/tmp/myfile.parquet', './mypath', 's3://mybucket/mypath', ...).
-        :param dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
-        :param recipe_root: The absolute path of the associated recipe root directory on the
-                              local filesystem.
-        :param version: The version of the Delta table to read.
-        :param timestamp: The timestamp at which to read the Delta table.
+        Args:
+            location: The location of the dataset (e.g. '/tmp/myfile.parquet', './mypath',
+                's3://mybucket/mypath', ...).
+            dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
+            recipe_root: The absolute path of the associated recipe root directory on the
+                local filesystem.
+            version: The version of the Delta table to read.
+            timestamp: The timestamp at which to read the Delta table.
         """
         super().__init__(location=location, dataset_format=dataset_format, recipe_root=recipe_root)
         self.version = version
@@ -578,7 +610,7 @@ class DeltaTableDataset(_SparkDatasetMixin, _LocationBasedDataset):
         if self.timestamp is not None:
             spark_read_op = spark_read_op.option("timestampAsOf", self.timestamp)
         spark_df = spark_read_op.load(self.location)
-        pandas_df = spark_df.toPandas()
+        pandas_df = self._convert_spark_df_to_pandas(spark_df)
         write_pandas_df_as_parquet(df=pandas_df, data_parquet_path=dst_path)
 
     @staticmethod
@@ -586,7 +618,7 @@ class DeltaTableDataset(_SparkDatasetMixin, _LocationBasedDataset):
         return dataset_format == "delta"
 
     @classmethod
-    def _from_config(cls, dataset_config: Dict[str, Any], recipe_root: str) -> _DatasetType:
+    def _from_config(cls, dataset_config: dict[str, Any], recipe_root: str) -> "_Dataset":
         return cls(
             location=cls._get_required_config(dataset_config=dataset_config, key="location"),
             recipe_root=recipe_root,
@@ -604,11 +636,12 @@ class SparkSqlDataset(_SparkDatasetMixin, _Dataset):
 
     def __init__(self, sql: str, location: str, dataset_format: str):
         """
-        :param sql: The Spark SQL query string that defines the dataset
-                    (e.g. 'SELECT * FROM my_spark_table').
-        :param location: The location of the dataset
-                    (e.g. 'catalog.schema.table', 'schema.table', 'table').
-        :param dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
+        Args:
+            sql: The Spark SQL query string that defines the dataset
+                (e.g. 'SELECT * FROM my_spark_table').
+            location: The location of the dataset
+                (e.g. 'catalog.schema.table', 'schema.table', 'table').
+            dataset_format: The format of the dataset (e.g. 'csv', 'parquet', ...).
         """
         super().__init__(dataset_format=dataset_format)
         self.sql = sql
@@ -626,11 +659,11 @@ class SparkSqlDataset(_SparkDatasetMixin, _Dataset):
             spark_df = spark_session.sql(self.sql)
         elif self.location is not None:
             spark_df = spark_session.table(self.location)
-        pandas_df = spark_df.toPandas()
+        pandas_df = self._convert_spark_df_to_pandas(spark_df)
         write_pandas_df_as_parquet(df=pandas_df, data_parquet_path=dst_path)
 
     @classmethod
-    def _from_config(cls, dataset_config: Dict[str, Any], recipe_root: str) -> _DatasetType:
+    def _from_config(cls, dataset_config: dict[str, Any], recipe_root: str) -> "_Dataset":
         return cls(
             sql=dataset_config.get("sql"),
             location=dataset_config.get("location"),

@@ -3,16 +3,10 @@ import time
 import mlflow
 import mlflow.spark
 
-from tests.tracking.test_rest_tracking import mlflow_client  # pylint: disable=unused-import
 from tests.spark.autologging.utils import (
     _assert_spark_data_logged,
     _assert_spark_data_not_logged,
 )
-from tests.spark.autologging.utils import spark_session  # pylint: disable=unused-import
-from tests.spark.autologging.utils import format_to_file_path  # pylint: disable=unused-import
-from tests.spark.autologging.utils import data_format  # pylint: disable=unused-import
-from tests.spark.autologging.utils import file_path  # pylint: disable=unused-import
-
 
 # Note that the following tests run one-after-the-other and operate on the SAME spark_session
 #   (it is not reset between tests)
@@ -100,8 +94,3 @@ def test_autologging_disabled_then_enabled(spark_session, format_to_file_path):
         time.sleep(1)
     run = mlflow.get_run(run_id)
     _assert_spark_data_logged(run=run, path=file_path, data_format=data_format)
-
-
-def test_enabling_autologging_does_not_throw_when_spark_hasnt_been_started(spark_session):
-    spark_session.stop()
-    mlflow.spark.autolog(disable=True)

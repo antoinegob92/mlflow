@@ -17,12 +17,44 @@ CREATE TABLE experiments (
 )
 
 
+CREATE TABLE input_tags (
+	input_uuid VARCHAR(36) NOT NULL,
+	name VARCHAR(255) NOT NULL,
+	value VARCHAR(500) NOT NULL,
+	PRIMARY KEY (input_uuid, name)
+)
+
+
+CREATE TABLE inputs (
+	input_uuid VARCHAR(36) NOT NULL,
+	source_type VARCHAR(36) NOT NULL,
+	source_id VARCHAR(36) NOT NULL,
+	destination_type VARCHAR(36) NOT NULL,
+	destination_id VARCHAR(36) NOT NULL,
+	PRIMARY KEY (source_type, source_id, destination_type, destination_id)
+)
+
+
 CREATE TABLE registered_models (
 	name VARCHAR(191) NOT NULL,
 	creation_time BIGINT,
 	last_updated_time BIGINT,
 	description VARCHAR(5000),
 	PRIMARY KEY (name)
+)
+
+
+CREATE TABLE datasets (
+	dataset_uuid VARCHAR(36) NOT NULL,
+	experiment_id INTEGER NOT NULL,
+	name VARCHAR(500) NOT NULL,
+	digest VARCHAR(36) NOT NULL,
+	dataset_source_type VARCHAR(36) NOT NULL,
+	dataset_source TEXT NOT NULL,
+	dataset_schema MEDIUMTEXT,
+	dataset_profile MEDIUMTEXT,
+	PRIMARY KEY (experiment_id, name, digest),
+	CONSTRAINT fk_datasets_experiment_id_experiments FOREIGN KEY(experiment_id) REFERENCES experiments (experiment_id) ON DELETE CASCADE
 )
 
 
@@ -48,8 +80,18 @@ CREATE TABLE model_versions (
 	status VARCHAR(20),
 	status_message VARCHAR(500),
 	run_link VARCHAR(500),
+	storage_location VARCHAR(500),
 	PRIMARY KEY (name, version),
 	CONSTRAINT model_versions_ibfk_1 FOREIGN KEY(name) REFERENCES registered_models (name) ON UPDATE CASCADE
+)
+
+
+CREATE TABLE registered_model_aliases (
+	alias VARCHAR(256) NOT NULL,
+	version INTEGER NOT NULL,
+	name VARCHAR(256) NOT NULL,
+	PRIMARY KEY (name, alias),
+	CONSTRAINT registered_model_alias_name_fkey FOREIGN KEY(name) REFERENCES registered_models (name) ON DELETE CASCADE ON UPDATE CASCADE
 )
 
 
@@ -82,6 +124,17 @@ CREATE TABLE runs (
 	CONSTRAINT runs_chk_1 CHECK ((`status` in (_utf8mb4'SCHEDULED',_utf8mb4'FAILED',_utf8mb4'FINISHED',_utf8mb4'RUNNING',_utf8mb4'KILLED'))),
 	CONSTRAINT runs_lifecycle_stage CHECK ((`lifecycle_stage` in (_utf8mb4'active',_utf8mb4'deleted'))),
 	CONSTRAINT source_type CHECK ((`source_type` in (_utf8mb4'NOTEBOOK',_utf8mb4'JOB',_utf8mb4'LOCAL',_utf8mb4'UNKNOWN',_utf8mb4'PROJECT')))
+)
+
+
+CREATE TABLE trace_info (
+	request_id VARCHAR(50) NOT NULL,
+	experiment_id INTEGER NOT NULL,
+	timestamp_ms BIGINT NOT NULL,
+	execution_time_ms BIGINT,
+	status VARCHAR(50) NOT NULL,
+	PRIMARY KEY (request_id),
+	CONSTRAINT fk_trace_info_experiment_id FOREIGN KEY(experiment_id) REFERENCES experiments (experiment_id)
 )
 
 
@@ -124,7 +177,7 @@ CREATE TABLE model_version_tags (
 
 CREATE TABLE params (
 	key VARCHAR(250) NOT NULL,
-	value VARCHAR(500) NOT NULL,
+	value VARCHAR(8000) NOT NULL,
 	run_uuid VARCHAR(32) NOT NULL,
 	PRIMARY KEY (key, run_uuid),
 	CONSTRAINT params_ibfk_1 FOREIGN KEY(run_uuid) REFERENCES runs (run_uuid)
@@ -133,8 +186,26 @@ CREATE TABLE params (
 
 CREATE TABLE tags (
 	key VARCHAR(250) NOT NULL,
-	value VARCHAR(5000),
+	value VARCHAR(8000),
 	run_uuid VARCHAR(32) NOT NULL,
 	PRIMARY KEY (key, run_uuid),
 	CONSTRAINT tags_ibfk_1 FOREIGN KEY(run_uuid) REFERENCES runs (run_uuid)
+)
+
+
+CREATE TABLE trace_request_metadata (
+	key VARCHAR(250) NOT NULL,
+	value VARCHAR(8000),
+	request_id VARCHAR(50) NOT NULL,
+	PRIMARY KEY (key, request_id),
+	CONSTRAINT fk_trace_request_metadata_request_id FOREIGN KEY(request_id) REFERENCES trace_info (request_id) ON DELETE CASCADE
+)
+
+
+CREATE TABLE trace_tags (
+	key VARCHAR(250) NOT NULL,
+	value VARCHAR(8000),
+	request_id VARCHAR(50) NOT NULL,
+	PRIMARY KEY (key, request_id),
+	CONSTRAINT fk_trace_tags_request_id FOREIGN KEY(request_id) REFERENCES trace_info (request_id) ON DELETE CASCADE
 )

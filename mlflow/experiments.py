@@ -3,11 +3,10 @@ import os
 import click
 
 import mlflow
-from mlflow.data import is_uri
 from mlflow.entities import ViewType
 from mlflow.tracking import _get_store, fluent
+from mlflow.utils.data_utils import is_uri
 from mlflow.utils.string_utils import _create_table
-
 
 EXPERIMENT_ID = click.option("--experiment-id", "-x", type=click.STRING, required=True)
 
@@ -18,7 +17,6 @@ def commands():
     Manage experiments. To manage experiments associated with a tracking server, set the
     MLFLOW_TRACKING_URI environment variable to the URL of the desired server.
     """
-    pass
 
 
 @commands.command()
@@ -95,7 +93,7 @@ def delete_experiment(experiment_id):
     """
     store = _get_store()
     store.delete_experiment(experiment_id)
-    click.echo("Experiment with ID %s has been deleted." % str(experiment_id))
+    click.echo(f"Experiment with ID {experiment_id} has been deleted.")
 
 
 @commands.command("restore")
@@ -108,7 +106,7 @@ def restore_experiment(experiment_id):
     """
     store = _get_store()
     store.restore_experiment(experiment_id)
-    click.echo("Experiment with id %s has been restored." % str(experiment_id))
+    click.echo(f"Experiment with id {experiment_id} has been restored.")
 
 
 @commands.command("rename")
@@ -136,8 +134,7 @@ def generate_csv_with_runs(experiment_id, filename):
     if filename:
         runs.to_csv(filename, index=False)
         click.echo(
-            "Experiment with ID %s has been exported as a CSV to file: %s."
-            % (experiment_id, filename)
+            f"Experiment with ID {experiment_id} has been exported as a CSV to file: {filename}."
         )
     else:
         click.echo(runs.to_csv(index=False))

@@ -7,7 +7,6 @@ from mlflow.store.artifact.artifact_repository_registry import get_artifact_repo
 from mlflow.tracking import _get_store
 from mlflow.utils.proto_json_utils import message_to_json
 
-
 _logger = logging.getLogger(__name__)
 
 
@@ -19,7 +18,6 @@ def commands():
     To manage artifacts for a run associated with a tracking server, set the MLFLOW_TRACKING_URI
     environment variable to the URL of the desired server.
     """
-    pass
 
 
 @commands.command("log-artifact")
@@ -136,7 +134,7 @@ def download_artifacts(run_id, artifact_path, artifact_uri, dst_path):
     downloaded_local_artifact_location = _download_artifacts(
         artifact_uri=artifact_uri, run_id=run_id, artifact_path=artifact_path, dst_path=dst_path
     )
-    click.echo(downloaded_local_artifact_location)
+    click.echo(f"\n{downloaded_local_artifact_location}")
 
 
 if __name__ == "__main__":

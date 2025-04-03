@@ -1,21 +1,22 @@
 from mlflow.entities import Experiment, LifecycleStage
-from mlflow.utils.time_utils import get_current_time_millis
-from tests.helper_functions import random_int, random_file
+from mlflow.utils.time import get_current_time_millis
+
+from tests.helper_functions import random_file, random_int
 
 
-def _check(exp, exp_id, name, location, lifecyle_stage, creation_time, last_update_time):
+def _check(exp, exp_id, name, location, lifecycle_stage, creation_time, last_update_time):
     assert isinstance(exp, Experiment)
     assert exp.experiment_id == exp_id
     assert exp.name == name
     assert exp.artifact_location == location
-    assert exp.lifecycle_stage == lifecyle_stage
+    assert exp.lifecycle_stage == lifecycle_stage
     assert exp.creation_time == creation_time
     assert exp.last_update_time == last_update_time
 
 
 def test_creation_and_hydration():
     exp_id = str(random_int())
-    name = "exp_%d_%d" % (random_int(), random_int())
+    name = f"exp_{random_int()}_{random_int()}"
     lifecycle_stage = LifecycleStage.ACTIVE
     location = random_file(".json")
     creation_time = get_current_time_millis()

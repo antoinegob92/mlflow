@@ -1,24 +1,26 @@
-import pytest
 from unittest import mock
+
 import numpy as np
+import pytest
 from statsmodels.tsa.base.tsa_model import TimeSeriesModel
+
 import mlflow
-from mlflow import MlflowClient
 import mlflow.statsmodels
+from mlflow import MlflowClient
+
 from tests.statsmodels.model_fixtures import (
     arma_model,
-    ols_model,
     failing_logit_model,
-    glsar_model,
     gee_model,
     glm_model,
     gls_model,
+    glsar_model,
+    ols_model,
     recursivels_model,
     rolling_ols_model,
     rolling_wls_model,
     wls_model,
 )
-
 from tests.statsmodels.test_statsmodels_model_export import _get_dates_from_df
 
 # The code in this file has been adapted from the test cases of the lightgbm flavor.
@@ -33,6 +35,15 @@ def test_statsmodels_autolog_ends_auto_created_run():
     mlflow.statsmodels.autolog()
     arma_model()
     assert mlflow.active_run() is None
+
+
+def test_extra_tags_statsmodels_autolog():
+    mlflow.statsmodels.autolog(extra_tags={"test_tag": "stats_autolog"})
+    arma_model()
+
+    run = mlflow.last_active_run()
+    assert run.data.tags["test_tag"] == "stats_autolog"
+    assert run.data.tags[mlflow.utils.mlflow_tags.MLFLOW_AUTOLOGGING] == "statsmodels"
 
 
 def test_statsmodels_autolog_persists_manually_created_run():
@@ -94,18 +105,20 @@ def test_statsmodels_autolog_logs_summary_artifact():
 def test_statsmodels_autolog_emit_warning_when_model_is_large():
     mlflow.statsmodels.autolog()
 
-    with mock.patch(
-        "mlflow.statsmodels._model_size_threshold_for_emitting_warning", float("inf")
-    ), mock.patch("mlflow.statsmodels._logger.warning") as mock_warning:
+    with (
+        mock.patch("mlflow.statsmodels._model_size_threshold_for_emitting_warning", float("inf")),
+        mock.patch("mlflow.statsmodels._logger.warning") as mock_warning,
+    ):
         ols_model()
         assert all(
             not call_args[0][0].startswith("The fitted model is larger than")
             for call_args in mock_warning.call_args_list
         )
 
-    with mock.patch("mlflow.statsmodels._model_size_threshold_for_emitting_warning", 1), mock.patch(
-        "mlflow.statsmodels._logger.warning"
-    ) as mock_warning:
+    with (
+        mock.patch("mlflow.statsmodels._model_size_threshold_for_emitting_warning", 1),
+        mock.patch("mlflow.statsmodels._logger.warning") as mock_warning,
+    ):
         ols_model()
         assert any(
             call_args[0][0].startswith("The fitted model is larger than")
@@ -132,17 +145,17 @@ def test_statsmodels_autolog_failed_metrics_warning():
         def as_text(self):
             return "mock summary."
 
-    with mock.patch(
-        "statsmodels.regression.linear_model.OLSResults.f_pvalue", metric_raise_error
-    ), mock.patch(
-        "statsmodels.regression.linear_model.OLSResults.fvalue", metric_raise_error
-    ), mock.patch(
-        # Prevent `OLSResults.summary` from calling `fvalue` and `f_pvalue` that raise an exception
-        "statsmodels.regression.linear_model.OLSResults.summary",
-        return_value=MockSummary(),
-    ), mock.patch(
-        "mlflow.statsmodels._logger.warning"
-    ) as mock_warning:
+    with (
+        mock.patch("statsmodels.regression.linear_model.OLSResults.f_pvalue", metric_raise_error),
+        mock.patch("statsmodels.regression.linear_model.OLSResults.fvalue", metric_raise_error),
+        mock.patch(
+            # Prevent `OLSResults.summary` from calling `fvalue` and `f_pvalue` that raise an
+            # exception
+            "statsmodels.regression.linear_model.OLSResults.summary",
+            return_value=MockSummary(),
+        ),
+        mock.patch("mlflow.statsmodels._logger.warning") as mock_warning,
+    ):
         ols_model()
         mock_warning.assert_called_once_with("Failed to autolog metrics: f_pvalue, fvalue.")
 

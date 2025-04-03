@@ -1,10 +1,8 @@
 from mlflow.entities.model_registry._model_registry_entity import _ModelRegistryEntity
-from mlflow.entities.model_registry.model_version_tag import ModelVersionTag
 from mlflow.entities.model_registry.model_version_status import ModelVersionStatus
-from mlflow.protos.model_registry_pb2 import (
-    ModelVersion as ProtoModelVersion,
-    ModelVersionTag as ProtoModelVersionTag,
-)
+from mlflow.entities.model_registry.model_version_tag import ModelVersionTag
+from mlflow.protos.model_registry_pb2 import ModelVersion as ProtoModelVersion
+from mlflow.protos.model_registry_pb2 import ModelVersionTag as ProtoModelVersionTag
 
 
 class ModelVersion(_ModelRegistryEntity):
@@ -27,6 +25,7 @@ class ModelVersion(_ModelRegistryEntity):
         status_message=None,
         tags=None,
         run_link=None,
+        aliases=None,
     ):
         super().__init__()
         self._name = name
@@ -42,6 +41,7 @@ class ModelVersion(_ModelRegistryEntity):
         self._status = status
         self._status_message = status_message
         self._tags = {tag.key: tag.value for tag in (tags or [])}
+        self._aliases = aliases or []
 
     @property
     def name(self):
@@ -65,7 +65,8 @@ class ModelVersion(_ModelRegistryEntity):
     @property
     def last_updated_timestamp(self):
         """Integer. Timestamp of last update for this model version (milliseconds since the Unix
-        epoch)."""
+        epoch).
+        """
         return self._last_updated_timestamp
 
     @last_updated_timestamp.setter
@@ -125,6 +126,15 @@ class ModelVersion(_ModelRegistryEntity):
         """Dictionary of tag key (string) -> tag value for the current model version."""
         return self._tags
 
+    @property
+    def aliases(self):
+        """List of aliases (string) for the current model version."""
+        return self._aliases
+
+    @aliases.setter
+    def aliases(self, aliases):
+        self._aliases = aliases
+
     @classmethod
     def _properties(cls):
         # aggregate with base class properties since cls.__dict__ does not do it automatically
@@ -143,14 +153,15 @@ class ModelVersion(_ModelRegistryEntity):
             proto.version,
             proto.creation_timestamp,
             proto.last_updated_timestamp,
-            proto.description,
+            proto.description if proto.HasField("description") else None,
             proto.user_id,
             proto.current_stage,
             proto.source,
-            proto.run_id,
+            proto.run_id if proto.HasField("run_id") else None,
             ModelVersionStatus.to_string(proto.status),
-            proto.status_message,
+            proto.status_message if proto.HasField("status_message") else None,
             run_link=proto.run_link,
+            aliases=proto.aliases,
         )
         for tag in proto.tags:
             model_version._add_tag(ModelVersionTag.from_proto(tag))
@@ -184,4 +195,5 @@ class ModelVersion(_ModelRegistryEntity):
         model_version.tags.extend(
             [ProtoModelVersionTag(key=key, value=value) for key, value in self._tags.items()]
         )
+        model_version.aliases.extend(self.aliases)
         return model_version

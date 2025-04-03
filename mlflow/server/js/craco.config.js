@@ -1,16 +1,14 @@
 const url = require('url');
 const path = require('path');
 const fs = require('fs');
+const TsconfigPathsPlugin = require('tsconfig-paths-webpack-plugin');
 const webpack = require('webpack');
-const { ModuleFederationPlugin } = require('webpack').container;
-const { execSync } = require('child_process');
 
 const proxyTarget = process.env.MLFLOW_PROXY;
 const useProxyServer = !!proxyTarget && !process.env.MLFLOW_DEV_PROXY_MODE;
 
 const isDevserverWebsocketRequest = (request) =>
-  request.url === '/ws' &&
-  (request.headers.upgrade === 'websocket' || request.headers['sec-websocket-version']);
+  request.url === '/ws' && (request.headers.upgrade === 'websocket' || request.headers['sec-websocket-version']);
 
 function mayProxy(pathname) {
   const publicPrefixPrefix = '/static-files/';
@@ -48,12 +46,11 @@ function rewriteCookies(proxyRes) {
   }
 }
 
-
 /**
  * Since the base publicPath is configured to a relative path ("static-files/"),
  * the files referenced inside CSS files (e.g. fonts) can be incorrectly resolved
  * (e.g. /path/to/css/file/static-files/static/path/to/font.woff). We need to override
- * the CSS loader to make sure it will resolve to a proper absolute path. This is
+ * the CSS loader to make sure it will resolve to a proper relative path. This is
  * required for the production (bundled) builds only.
  */
 function configureIframeCSSPublicPaths(config, env) {
@@ -72,12 +69,9 @@ function configureIframeCSSPublicPaths(config, env) {
         .filter((oneOf) => oneOf.test?.toString() === /\.css$/.toString())
         .forEach((cssRule) => {
           cssRule.use
-            ?.filter((loaderConfig) => loaderConfig?.loader.match(/\/mini-css-extract-plugin\//))
+            ?.filter((loaderConfig) => loaderConfig?.loader.match(/[\/\\]mini-css-extract-plugin[\/\\]/))
             .forEach((loaderConfig) => {
-              let publicPath = '/static-files/';
-              // eslint-disable-next-line no-param-reassign
-              loaderConfig.options = { publicPath };
-
+              loaderConfig.options = { publicPath: '../../' };
               cssRuleFixed = true;
             });
         });
@@ -101,9 +95,7 @@ function enableOptionalTypescript(config) {
    * We're going to exclude typechecking test files from webpack's pipeline
    */
 
-  const ForkTsCheckerPlugin = config.plugins.find(
-    (plugin) => plugin.constructor.name === 'ForkTsCheckerWebpackPlugin',
-  );
+  const ForkTsCheckerPlugin = config.plugins.find((plugin) => plugin.constructor.name === 'ForkTsCheckerWebpackPlugin');
 
   if (ForkTsCheckerPlugin) {
     ForkTsCheckerPlugin.options.typescript.configOverwrite.exclude = [
@@ -150,7 +142,7 @@ function i18nOverrides(config) {
   return config;
 }
 
-module.exports = function ({ env }) {
+module.exports = function () {
   const config = {
     babel: {
       env: {
@@ -190,8 +182,8 @@ module.exports = function ({ env }) {
         ],
       ],
     },
-    ...(useProxyServer && {
-      devServer: {
+    devServer: {
+      ...(useProxyServer && {
         hot: true,
         https: true,
         proxy: [
@@ -219,10 +211,23 @@ module.exports = function ({ env }) {
         host: 'localhost',
         port: 3000,
         open: false,
+      }),
+      client: {
+        overlay: {
+          errors: false,
+          warnings: false,
+          runtimeErrors: (error) => {
+            // It is safe to ignore based on https://stackoverflow.com/a/50387233/12110203.
+            if (error?.message.match(/ResizeObserver/i)) {
+              return false;
+            }
+            return true;
+          },
+        },
       },
-    }),
+    },
     jest: {
-      configure: (jestConfig, { env, paths, resolve, rootDir }) => {
+      configure: (jestConfig) => {
         /*
          * Jest running on the currently used node version is not yet capable of ESM processing:
          * https://jestjs.io/docs/ecmascript-modules
@@ -233,7 +238,7 @@ module.exports = function ({ env }) {
          */
         const createIgnorePatternForESM = () => {
           // List all the modules that we *want* to be transpiled by babel
-          const transpiledModules = [
+          const transpileModules = [
             '@databricks/design-system',
             '@babel/runtime/.+?/esm',
             '@ant-design/icons',
@@ -242,26 +247,21 @@ module.exports = function ({ env }) {
 
           // We'll ignore only dependencies in 'node_modules' directly within certain
           // directories in order to avoid false positive matches in nested modules.
-          const validNodeModulesRoots = [
-            'mlflow/web/js',
-          ];
+          const validNodeModulesRoots = ['mlflow/web/js'];
 
           // prettier-ignore
           // eslint-disable-next-line max-len
-          return `(${validNodeModulesRoots.join('|')})\\/node_modules\\/((?!(${transpiledModules.join('|')})).)+(js|jsx|mjs|cjs|ts|tsx|json)$`;
+          return `(${validNodeModulesRoots.join('|')})\\/node_modules\\/((?!(${transpileModules.join('|')})).)+(js|jsx|mjs|cjs|ts|tsx|json)$`;
         };
 
         jestConfig.resetMocks = false; // ML-20462 Restore resetMocks
-        jestConfig.collectCoverageFrom = [
-          'src/**/*.{js,jsx}',
-          '!**/*.test.{js,jsx}',
-          '!**/__tests__/*.{js,jsx}',
-        ];
+        jestConfig.collectCoverageFrom = ['src/**/*.{js,jsx}', '!**/*.test.{js,jsx}', '!**/__tests__/*.{js,jsx}'];
         jestConfig.coverageReporters = ['lcov'];
-        jestConfig.setupFiles = [
-          'jest-canvas-mock',
-          '<rootDir>/scripts/throw-on-prop-type-warning.js',
-        ];
+        jestConfig.setupFiles = ['jest-canvas-mock'];
+        jestConfig.setupFilesAfterEnv.push('<rootDir>/scripts/env-mocks.js');
+        jestConfig.setupFilesAfterEnv.push('<rootDir>/scripts/setup-jest-dom-matchers.js');
+        jestConfig.setupFilesAfterEnv.push('<rootDir>/scripts/setup-testing-library.js');
+        jestConfig.setupFilesAfterEnv.push('<rootDir>/src/setupTests.js');
         // Adjust config to work with dependencies using ".mjs" file extensions
         jestConfig.moduleFileExtensions.push('mjs');
         // Remove when this issue is resolved: https://github.com/gsoft-inc/craco/issues/393
@@ -271,34 +271,47 @@ module.exports = function ({ env }) {
         };
         jestConfig.transformIgnorePatterns = ['\\.pnp\\.[^\\/]+$', createIgnorePatternForESM()];
         jestConfig.globalSetup = '<rootDir>/scripts/global-setup.js';
+
+        const moduleNameMapper = {
+          ...jestConfig.moduleNameMapper,
+          '@databricks/design-system/(.+)': '<rootDir>/node_modules/@databricks/design-system/dist/$1',
+          '@databricks/web-shared/(.*)': '<rootDir>/src/shared/web-shared/$1',
+          '@mlflow/mlflow/(.*)': '<rootDir>/$1',
+        };
+
+        jestConfig.moduleNameMapper = moduleNameMapper;
+
         return jestConfig;
       },
     },
     webpack: {
-      resolve: {
-        fallback: {
-          buffer: require.resolve('buffer'), // Needed by js-yaml
-          defineProperty: require.resolve('define-property'), // Needed by babel
-        },
-      },
-      configure: (webpackConfig, { env, paths }) => {
+      configure: (webpackConfig, { env }) => {
         webpackConfig.output.publicPath = 'static-files/';
         webpackConfig = i18nOverrides(webpackConfig);
         webpackConfig = configureIframeCSSPublicPaths(webpackConfig, env);
         webpackConfig = enableOptionalTypescript(webpackConfig);
+        webpackConfig.resolve = {
+          ...webpackConfig.resolve,
+          plugins: [new TsconfigPathsPlugin(), ...webpackConfig.resolve.plugins],
+          fallback: {
+            // Required by 'plotly.js' download image feature
+            stream: require.resolve('stream-browserify'),
+          },
+          alias: {
+            ...webpackConfig.resolve.alias,
+            // Fix integration with react 18 and react-dnd@15
+            // https://github.com/react-dnd/react-dnd/issues/3433#issuecomment-1102144912
+            'react/jsx-runtime.js': require.resolve('react/jsx-runtime'),
+            'react/jsx-dev-runtime.js': require.resolve('react/jsx-dev-runtime'),
+          },
+        };
         console.log('Webpack config:', webpackConfig);
         return webpackConfig;
       },
       plugins: [
-        new webpack.DefinePlugin({
-          'process.env.HOSTED_PATH': JSON.stringify(''),
-        }),
         new webpack.EnvironmentPlugin({
-          HIDE_HEADER: process.env.HIDE_HEADER ? 'true' : 'false',
-          HIDE_EXPERIMENT_LIST: process.env.HIDE_EXPERIMENT_LIST ? 'true' : 'false',
-          SHOW_GDPR_PURGING_MESSAGES: process.env.SHOW_GDPR_PURGING_MESSAGES ? 'true' : 'false',
-          USE_ABSOLUTE_AJAX_URLS: process.env.USE_ABSOLUTE_AJAX_URLS ? 'true' : 'false',
-          SHOULD_REDIRECT_IFRAME: process.env.SHOULD_REDIRECT_IFRAME ? 'true' : 'false',
+          MLFLOW_SHOW_GDPR_PURGING_MESSAGES: process.env.MLFLOW_SHOW_GDPR_PURGING_MESSAGES ? 'true' : 'false',
+          MLFLOW_USE_ABSOLUTE_AJAX_URLS: process.env.MLFLOW_USE_ABSOLUTE_AJAX_URLS ? 'true' : 'false',
         }),
       ],
     },

@@ -1,4 +1,4 @@
-import { Button, PlusCircleBorderIcon } from '@databricks/design-system';
+import { Button, PlusCircleIcon } from '@databricks/design-system';
 import { Theme } from '@emotion/react';
 import { useCallback, useEffect, useRef } from 'react';
 import { FormattedMessage } from 'react-intl';
@@ -21,8 +21,10 @@ const CLASS_IS_MINIMIZED = 'is-minimized';
 const AG_GRID_CLS = {
   ROOT: '.ag-root',
   LEFT_COLS_CONTAINER: '.ag-pinned-left-cols-container',
+  FULL_WIDTH_ROW: '.ag-full-width-row',
   COLS_CONTAINER: '.ag-center-cols-container',
   HEADER: '.ag-header',
+  BODY_VIEWPORT: '.ag-body-viewport',
 };
 
 interface ExperimentViewRunsTableAddColumnCTAProps {
@@ -30,7 +32,8 @@ interface ExperimentViewRunsTableAddColumnCTAProps {
   gridContainerElement: HTMLElement | null;
   isInitialized: boolean;
   visible?: boolean;
-  moreAvailableParamsAndMetricsColumnCount?: number;
+  moreRunsAvailable?: boolean;
+  moreAvailableRunsTableColumnCount?: number;
 }
 
 /**
@@ -48,7 +51,7 @@ interface ExperimentViewRunsTableAddColumnCTAProps {
  *       isInitialized={gridInitialized}
  *       onAddColumnClicked={onAddColumnClicked}
  *       visible={!isLoading}
- *       moreAvailableParamsAndMetricsColumnCount={3}
+ *       moreAvailableRunsTableColumnCount={3}
  *     />
  *   </div>
  * );
@@ -58,11 +61,19 @@ export const ExperimentViewRunsTableAddColumnCTA = ({
   gridContainerElement,
   isInitialized,
   visible,
-  moreAvailableParamsAndMetricsColumnCount = 0,
+  moreRunsAvailable,
+  moreAvailableRunsTableColumnCount = 0,
 }: ExperimentViewRunsTableAddColumnCTAProps) => {
   const ctaRef = useRef<HTMLDivElement>(null);
 
   const savedContainerRef = useRef<HTMLElement>();
+  const immediateMoreRunsAvailable = useRef<boolean>(Boolean(moreRunsAvailable));
+
+  // Save immediate value of "moreRunsAvailable" so the fresh version
+  // will be accessible within the resize observer
+  useEffect(() => {
+    immediateMoreRunsAvailable.current = Boolean(moreRunsAvailable);
+  }, [moreRunsAvailable]);
 
   const initialize = useCallback((containerElement: HTMLElement) => {
     if (!ctaRef.current || !window.ResizeObserver || !containerElement) {
@@ -78,12 +89,14 @@ export const ExperimentViewRunsTableAddColumnCTA = ({
     const refLeftElem = containerElement.querySelector(AG_GRID_CLS.LEFT_COLS_CONTAINER);
     const refCenterElem = containerElement.querySelector(AG_GRID_CLS.COLS_CONTAINER);
     const refHeaderElem = containerElement.querySelector(AG_GRID_CLS.HEADER);
+    const refBodyViewport = containerElement.querySelector(AG_GRID_CLS.BODY_VIEWPORT);
 
     /**
      * Initialize variables used for position calculation
      */
     let gridAreaWidth = 0;
     let leftColContainerWidth = 0;
+    let leftColContainerHeight = 0;
     let centerColContainerWidth = 0;
     let colContainerHeight = 0;
     let headerHeight = 0;
@@ -91,7 +104,7 @@ export const ExperimentViewRunsTableAddColumnCTA = ({
     /**
      * Execute only if all elements are in place
      */
-    if (refLeftElem && refCenterElem && refHeaderElem && rootElement) {
+    if (refLeftElem && refCenterElem && refHeaderElem && rootElement && refBodyViewport) {
       /**
        * Hook up an resize observer
        */
@@ -105,6 +118,9 @@ export const ExperimentViewRunsTableAddColumnCTA = ({
           }
           if (entry.target === refLeftElem) {
             leftColContainerWidth = entry.contentRect.width;
+            leftColContainerHeight = entry.contentRect.height;
+          }
+          if (entry.target === refBodyViewport) {
             colContainerHeight = entry.contentRect.height;
           }
           if (entry.target === refHeaderElem) {
@@ -134,11 +150,19 @@ export const ExperimentViewRunsTableAddColumnCTA = ({
           ? savedContainerRef.current?.classList.add(CLASS_OUT_OF_VIEWPORT)
           : savedContainerRef.current?.classList.remove(CLASS_OUT_OF_VIEWPORT);
 
+        // Check if "load more" button is visible
+        const loadMoreRowHeight = immediateMoreRunsAvailable.current ? 32 : 0;
+
+        // If the visible row set takes only portion of the table height-wise (leftColContainerHeight < colContainerHeight),
+        // let's contract our CTA a little so "load more" button will fit in. If it takes whole area, do not reduce its height.
+        const calculatedHeight =
+          leftColContainerHeight < colContainerHeight ? leftColContainerHeight - loadMoreRowHeight : colContainerHeight;
+
         /**
          * If the available height is too low, add a class that indicates
          * that we should display minimized version
          */
-        const shouldBeMinimized = colContainerHeight < 100;
+        const shouldBeMinimized = calculatedHeight < 100;
         shouldBeMinimized
           ? savedContainerRef.current?.classList.add(CLASS_IS_MINIMIZED)
           : savedContainerRef.current?.classList.remove(CLASS_IS_MINIMIZED);
@@ -152,7 +176,7 @@ export const ExperimentViewRunsTableAddColumnCTA = ({
         /**
          * Set target height and add 1px to accomodate the border.
          */
-        targetElement.style.height = `${colContainerHeight + 1}px`;
+        targetElement.style.height = `${calculatedHeight + 1}px`;
       });
 
       /**
@@ -162,6 +186,7 @@ export const ExperimentViewRunsTableAddColumnCTA = ({
       resizeObserver.observe(refCenterElem);
       resizeObserver.observe(refHeaderElem);
       resizeObserver.observe(rootElement);
+      resizeObserver.observe(refBodyViewport);
 
       /**
        * After cleanup, disconnect the observer.
@@ -190,16 +215,21 @@ export const ExperimentViewRunsTableAddColumnCTA = ({
     <div ref={ctaRef} css={styles.columnContainer} className={visible ? '' : CLASS_IS_HIDDEN}>
       {visible && (
         <div css={styles.buttonContainer}>
-          <Button css={styles.button} type='link' onClick={onClick}>
-            <PlusCircleBorderIcon css={styles.buttonIcon} />
+          <Button
+            componentId="codegen_mlflow_app_src_experiment-tracking_components_experiment-page_components_runs_experimentviewrunstableaddcolumncta.tsx_218"
+            css={styles.button}
+            type="link"
+            onClick={onClick}
+          >
+            <PlusCircleIcon css={styles.buttonIcon} />
             <div css={styles.caption}>
               <FormattedMessage
-                defaultMessage='Show more metrics and parameters'
-                description='Label for a CTA button in experiment runs table which invokes column management dropdown'
-              />{' '}
-              {moreAvailableParamsAndMetricsColumnCount ? (
-                <>({moreAvailableParamsAndMetricsColumnCount})</>
-              ) : null}
+                defaultMessage="Show more columns {count, select, 0 {} other {({count} total)}}"
+                description="Label for a CTA button in experiment runs table which invokes column management dropdown"
+                values={{
+                  count: moreAvailableRunsTableColumnCount,
+                }}
+              />
             </div>
           </Button>
         </div>
@@ -213,16 +243,10 @@ const styles = {
     width: COLUMN_CTA_WIDTH,
     height: 0,
     position: 'absolute' as const,
-    border: `1px solid ${theme.colors.grey200}`,
-    borderLeft: 0,
+    border: `1px solid ${theme.colors.borderDecorative}`,
     borderTop: 0,
     top: 0,
     left: 0,
-    // Slightly expanded icon to conform to the designs
-    svg: {
-      height: 16,
-      width: 16,
-    },
     willChange: 'transform' as const,
     transform: 'translate3d(0, 0, 0)',
     [`.${CLASS_IS_MINIMIZED} &`]: {
@@ -232,17 +256,19 @@ const styles = {
     [`&.${CLASS_IS_HIDDEN}, .${CLASS_OUT_OF_VIEWPORT} &`]: {
       display: 'none',
     },
+    pointerEvents: 'none' as const,
+    display: 'flex',
+    alignItems: 'center',
   }),
   buttonContainer: (theme: Theme) => ({
-    position: 'sticky' as const,
     top: 0,
     paddingLeft: theme.spacing.lg,
     paddingRight: theme.spacing.lg,
-    paddingTop: theme.spacing.lg,
     width: '100%',
     [`.${CLASS_IS_MINIMIZED} &`]: {
       paddingTop: theme.spacing.xs,
     },
+    pointerEvents: 'all' as const,
   }),
   button: { whiteSpace: 'pre-wrap' as const, width: '100%' },
   buttonIcon: (theme: Theme) => ({ color: theme.colors.textSecondary }),

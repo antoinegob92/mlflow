@@ -1,9 +1,9 @@
-from packaging.version import Version
 import logging
+
 import xgboost
+from packaging.version import Version
 
 # Suppress a false positive pylint error: https://github.com/PyCQA/pylint/issues/1630
-# pylint: disable=unused-import
 from mlflow.utils.autologging_utils import ExceptionSafeAbstractClass
 
 _logger = logging.getLogger(__name__)
@@ -42,11 +42,10 @@ if IS_TRAINING_CALLBACK_SUPPORTED:
         metaclass=ExceptionSafeAbstractClass,
     ):
         def __init__(self, metrics_logger, eval_results):
-            # pylint: disable=super-init-not-called
             self.metrics_logger = metrics_logger
             self.eval_results = eval_results
 
-        def after_iteration(self, model, epoch, evals_log):  # pylint: disable=unused-argument
+        def after_iteration(self, model, epoch, evals_log):
             """
             Run after each iteration. Return True when training should stop.
             """

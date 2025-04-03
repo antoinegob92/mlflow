@@ -17,7 +17,7 @@ on:
         default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 # Use `bash --noprofile --norc -exo pipefail` by default for all `run` steps in this workflow:
@@ -30,13 +30,16 @@ env:
   # Note miniconda is pre-installed in the virtual environments for GitHub Actions:
   # https://github.com/actions/virtual-environments/blob/main/images/linux/scripts/installers/miniconda.sh
   MLFLOW_CONDA_HOME: /usr/share/miniconda
+  PYTHONUTF8: "1"
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions: {}
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           path: ${{ github.event.inputs.repository }}
           repository: ${{ github.event.inputs.repository }}
@@ -45,19 +48,28 @@ jobs:
       - uses: ./.github/actions/cache-pip
       - name: Add problem matchers
         run: |
-          echo "::add-matcher::.github/workflows/matchers/pylint.json"
+          echo "::add-matcher::.github/workflows/matchers/clint.json"
           echo "::add-matcher::.github/workflows/matchers/black.json"
+          echo "::add-matcher::.github/workflows/matchers/ruff.json"
       - name: Install dependencies
         run: |
           pip install -r ${{ github.event.inputs.repository }}/requirements/lint-requirements.txt
-      - name: Run lint checks
+      - name: Install pre-commit hooks
         run: |
-          cd ${{ github.event.inputs.repository }} && ../../dev/lint.sh
+          cd ${{ github.event.inputs.repository }}
+          pre-commit install -t pre-commit -t prepare-commit-msg
+      - name: Run pre-commit
+        id: pre-commit
+        run: |
+          cd ${{ github.event.inputs.repository }}
+          pre-commit run --all-files
   recipe:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions: {}
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           path: ${{ github.event.inputs.repository }}
           repository: ${{ github.event.inputs.repository }}
@@ -65,7 +77,7 @@ jobs:
       - uses: ./.github/actions/setup-python
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install .
           pip install -r ${{ github.event.inputs.repository }}/requirements.txt
           pip install -r ${{ github.event.inputs.repository }}/requirements/test-requirements.txt
           # This dependency is needed pytest.ini uses pytest-cov
@@ -75,9 +87,11 @@ jobs:
           cd ${{ github.event.inputs.repository }} && pytest tests --rootdir .
   recipe-windows:
     runs-on: windows-latest
+    timeout-minutes: 120
+    permissions: {}
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           path: ${{ github.event.inputs.repository }}
           repository: ${{ github.event.inputs.repository }}
@@ -85,7 +99,7 @@ jobs:
       - uses: ./.github/actions/setup-python
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install .
           pip install -r ${{ github.event.inputs.repository }}/requirements.txt
           pip install -r ${{ github.event.inputs.repository }}/requirements/test-requirements.txt
           # This dependency is needed pytest.ini uses pytest-cov

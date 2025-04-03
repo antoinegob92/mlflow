@@ -1,44 +1,46 @@
-from pathlib import Path
-import torch
-from torch import nn
-from torch.utils.data import DataLoader
 import importlib
-import os
 import json
 import logging
+import os
 import pickle
 import re
+from pathlib import Path
 from unittest import mock
 
-import pytest
 import numpy as np
 import pandas as pd
-from sklearn import datasets
+import pytest
+import torch
 import yaml
+from packaging.version import Version
+from sklearn import datasets
+from torch import nn
+from torch.utils.data import DataLoader
 
-from mlflow import pyfunc
-import mlflow.pytorch
 import mlflow.pyfunc.scoring_server as pyfunc_scoring_server
-from mlflow.pytorch import get_default_conda_env
+import mlflow.pytorch
+from mlflow import pyfunc
 from mlflow.exceptions import MlflowException
-from mlflow.models import Model, infer_signature
-from mlflow.models.utils import _read_example
+from mlflow.models import Model, ModelSignature
+from mlflow.models.utils import _read_example, load_serving_example
+from mlflow.pytorch import get_default_conda_env
 from mlflow.pytorch import pickle_module as mlflow_pytorch_pickle_module
 from mlflow.store.artifact.s3_artifact_repo import S3ArtifactRepository
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
-from mlflow.utils.environment import _mlflow_conda_env, _mlflow_additional_pip_env
+from mlflow.types.schema import Schema, TensorSpec
+from mlflow.utils.environment import _mlflow_additional_pip_env, _mlflow_conda_env
 from mlflow.utils.file_utils import TempDir
 from mlflow.utils.model_utils import _get_flavor_configuration
-from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
 
 from tests.helper_functions import (
-    _compare_conda_env_requirements,
     _assert_pip_requirements,
+    _compare_conda_env_requirements,
+    _compare_logged_code_paths,
     _is_available_on_pypi,
     _is_importable,
-    _compare_logged_code_paths,
-    assert_array_almost_equal,
     _mlflow_major_version_string,
+    assert_array_almost_equal,
+    assert_register_model_called_with_local_model_path,
 )
 
 _logger = logging.getLogger(__name__)
@@ -57,6 +59,12 @@ EXTRA_PYFUNC_SERVING_TEST_ARGS = (
     [] if _is_available_on_pypi("torch") else ["--env-manager", "local"]
 )
 
+# in pytorch >= 2.6.0, the `weights_only` kwarg default has been changed from
+# `False` to `True`. this can cause pickle deserialization errors when loading
+# models, unless the model classes have been explicitly marked as safe using
+# `torch.serialization.add_safe_globals()`
+ENABLE_LEGACY_DESERIALIZATION = Version(torch.__version__) >= Version("2.6.0")
+
 
 @pytest.fixture(scope="module")
 def data():
@@ -69,10 +77,17 @@ def data():
     return x, y
 
 
+@pytest.fixture(scope="module")
+def iris_tensor_spec():
+    return ModelSignature(
+        inputs=Schema([TensorSpec(np.dtype("float32"), (-1, 4))]),
+        outputs=Schema([TensorSpec(np.dtype("float32"), (-1, 1))]),
+    )
+
+
 def get_dataset(data):
     x, y = data
-    dataset = [(xi.astype(np.float32), yi.astype(np.float32)) for xi, yi in zip(x.values, y.values)]
-    return dataset
+    return [(xi.astype(np.float32), yi.astype(np.float32)) for xi, yi in zip(x.values, y.values)]
 
 
 def train_model(model, data):
@@ -117,16 +132,13 @@ def get_subclassed_model_definition():
     can be invoked within a module to define the class in the module's scope.
     """
 
-    # pylint: disable=W0223
     class SubclassedModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.linear = torch.nn.Linear(4, 1)
 
         def forward(self, x):
-            # pylint: disable=arguments-differ
-            y_pred = self.linear(x)
-            return y_pred
+            return self.linear(x)
 
     return SubclassedModel
 
@@ -143,7 +155,6 @@ def main_scoped_subclassed_model(data):
     return model
 
 
-# pylint: disable=W0223
 class ModuleScopedSubclassedModel(get_subclassed_model_definition()):
     """
     A custom PyTorch model class defined in the test module scope. This is a subclass of
@@ -163,13 +174,13 @@ def module_scoped_subclassed_model(data):
 
 
 @pytest.fixture
-def model_path(tmpdir):
-    return os.path.join(str(tmpdir), "model")
+def model_path(tmp_path):
+    return os.path.join(tmp_path, "model")
 
 
 @pytest.fixture
-def pytorch_custom_env(tmpdir):
-    conda_env = os.path.join(str(tmpdir), "conda_env.yml")
+def pytorch_custom_env(tmp_path):
+    conda_env = os.path.join(tmp_path, "conda_env.yml")
     _mlflow_conda_env(conda_env, additional_pip_deps=["pytorch", "torchvision", "pytest"])
     return conda_env
 
@@ -196,11 +207,10 @@ def sequential_predicted(sequential_model, data):
 
 
 @pytest.mark.parametrize("scripted_model", [True, False])
-def test_signature_and_examples_are_saved_correctly(sequential_model, data):
+def test_signature_and_examples_are_saved_correctly(sequential_model, data, iris_tensor_spec):
     model = sequential_model
-    signature_ = infer_signature(*data)
-    example_ = data[0].head(3)
-    for signature in (None, signature_):
+    example_ = data[0].head(3).values.astype(np.float32)
+    for signature in (None, iris_tensor_spec):
         for example in (None, example_):
             with TempDir() as tmp:
                 path = tmp.path("model")
@@ -208,24 +218,23 @@ def test_signature_and_examples_are_saved_correctly(sequential_model, data):
                     model, path=path, signature=signature, input_example=example
                 )
                 mlflow_model = Model.load(path)
-                assert signature == mlflow_model.signature
+                if signature is None and example is None:
+                    assert mlflow_model.signature is None
+                else:
+                    assert mlflow_model.signature == iris_tensor_spec
                 if example is None:
                     assert mlflow_model.saved_input_example_info is None
                 else:
-                    assert all((_read_example(mlflow_model, path) == example).all())
+                    np.testing.assert_allclose(_read_example(mlflow_model, path), example)
 
 
 @pytest.mark.parametrize("scripted_model", [True, False])
 def test_log_model(sequential_model, data, sequential_predicted):
     try:
         artifact_path = "pytorch"
-        model_info = mlflow.pytorch.log_model(sequential_model, artifact_path=artifact_path)
-        model_uri = "runs:/{run_id}/{artifact_path}".format(
-            run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-        )
-        assert model_info.model_uri == model_uri
+        model_info = mlflow.pytorch.log_model(sequential_model, artifact_path)
 
-        sequential_model_loaded = mlflow.pytorch.load_model(model_uri=model_uri)
+        sequential_model_loaded = mlflow.pytorch.load_model(model_uri=model_info.model_uri)
         test_predictions = _predict(sequential_model_loaded, data)
         np.testing.assert_array_equal(test_predictions, sequential_predicted)
     finally:
@@ -235,33 +244,32 @@ def test_log_model(sequential_model, data, sequential_predicted):
 def test_log_model_calls_register_model(module_scoped_subclassed_model):
     custom_pickle_module = pickle
     artifact_path = "model"
-    register_model_patch = mock.patch("mlflow.register_model")
+    register_model_patch = mock.patch("mlflow.tracking._model_registry.fluent._register_model")
     with mlflow.start_run(), register_model_patch:
-        mlflow.pytorch.log_model(
-            artifact_path=artifact_path,
-            pytorch_model=module_scoped_subclassed_model,
+        model_info = mlflow.pytorch.log_model(
+            module_scoped_subclassed_model,
+            artifact_path,
             pickle_module=custom_pickle_module,
             registered_model_name="AdsModel1",
         )
-        model_uri = "runs:/{run_id}/{artifact_path}".format(
-            run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-        )
-        mlflow.register_model.assert_called_once_with(
-            model_uri, "AdsModel1", await_registration_for=DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+        assert_register_model_called_with_local_model_path(
+            register_model_mock=mlflow.tracking._model_registry.fluent._register_model,
+            model_uri=model_info.model_uri,
+            registered_model_name="AdsModel1",
         )
 
 
 def test_log_model_no_registered_model_name(module_scoped_subclassed_model):
     custom_pickle_module = pickle
     artifact_path = "model"
-    register_model_patch = mock.patch("mlflow.register_model")
+    register_model_patch = mock.patch("mlflow.tracking._model_registry.fluent._register_model")
     with mlflow.start_run(), register_model_patch:
         mlflow.pytorch.log_model(
-            artifact_path=artifact_path,
-            pytorch_model=module_scoped_subclassed_model,
+            module_scoped_subclassed_model,
+            artifact_path,
             pickle_module=custom_pickle_module,
         )
-        mlflow.register_model.assert_not_called()
+        mlflow.tracking._model_registry.fluent._register_model.assert_not_called()
 
 
 @pytest.mark.parametrize("scripted_model", [True, False])
@@ -278,8 +286,9 @@ def test_raise_exception(sequential_model):
         with pytest.raises(MlflowException, match=f"Path '{os.path.abspath(path)}' already exists"):
             mlflow.pytorch.save_model(sequential_model, path)
 
-        from mlflow import sklearn
         import sklearn.neighbors as knn
+
+        from mlflow import sklearn
 
         path = tmp.path("knn.pkl")
         knn = knn.KNeighborsClassifier()
@@ -385,60 +394,54 @@ def test_model_save_persists_requirements_in_mlflow_model_directory(
 
 
 @pytest.mark.parametrize("scripted_model", [False])
-def test_save_model_with_pip_requirements(sequential_model, tmpdir):
+def test_save_model_with_pip_requirements(sequential_model, tmp_path):
     expected_mlflow_version = _mlflow_major_version_string()
     # Path to a requirements file
-    tmpdir1 = tmpdir.join("1")
-    req_file = tmpdir.join("requirements.txt")
-    req_file.write("a")
-    mlflow.pytorch.save_model(sequential_model, tmpdir1.strpath, pip_requirements=req_file.strpath)
-    _assert_pip_requirements(tmpdir1.strpath, [expected_mlflow_version, "a"], strict=True)
+    tmpdir1 = tmp_path.joinpath("1")
+    req_file = tmp_path.joinpath("requirements.txt")
+    req_file.write_text("a")
+    mlflow.pytorch.save_model(sequential_model, tmpdir1, pip_requirements=str(req_file))
+    _assert_pip_requirements(tmpdir1, [expected_mlflow_version, "a"], strict=True)
 
     # List of requirements
-    tmpdir2 = tmpdir.join("2")
-    mlflow.pytorch.save_model(
-        sequential_model, tmpdir2.strpath, pip_requirements=[f"-r {req_file.strpath}", "b"]
-    )
-    _assert_pip_requirements(tmpdir2.strpath, [expected_mlflow_version, "a", "b"], strict=True)
+    tmpdir2 = tmp_path.joinpath("2")
+    mlflow.pytorch.save_model(sequential_model, tmpdir2, pip_requirements=[f"-r {req_file}", "b"])
+    _assert_pip_requirements(tmpdir2, [expected_mlflow_version, "a", "b"], strict=True)
 
     # Constraints file
-    tmpdir3 = tmpdir.join("3")
-    mlflow.pytorch.save_model(
-        sequential_model, tmpdir3.strpath, pip_requirements=[f"-c {req_file.strpath}", "b"]
-    )
+    tmpdir3 = tmp_path.joinpath("3")
+    mlflow.pytorch.save_model(sequential_model, tmpdir3, pip_requirements=[f"-c {req_file}", "b"])
     _assert_pip_requirements(
-        tmpdir3.strpath, [expected_mlflow_version, "b", "-c constraints.txt"], ["a"], strict=True
+        tmpdir3, [expected_mlflow_version, "b", "-c constraints.txt"], ["a"], strict=True
     )
 
 
 @pytest.mark.parametrize("scripted_model", [False])
-def test_save_model_with_extra_pip_requirements(sequential_model, tmpdir):
+def test_save_model_with_extra_pip_requirements(sequential_model, tmp_path):
     expected_mlflow_version = _mlflow_major_version_string()
     default_reqs = mlflow.pytorch.get_default_pip_requirements()
 
     # Path to a requirements file
-    tmpdir1 = tmpdir.join("1")
-    req_file = tmpdir.join("requirements.txt")
-    req_file.write("a")
-    mlflow.pytorch.save_model(
-        sequential_model, tmpdir1.strpath, extra_pip_requirements=req_file.strpath
-    )
-    _assert_pip_requirements(tmpdir1.strpath, [expected_mlflow_version, *default_reqs, "a"])
+    tmpdir1 = tmp_path.joinpath("1")
+    req_file = tmp_path.joinpath("requirements.txt")
+    req_file.write_text("a")
+    mlflow.pytorch.save_model(sequential_model, tmpdir1, extra_pip_requirements=str(req_file))
+    _assert_pip_requirements(tmpdir1, [expected_mlflow_version, *default_reqs, "a"])
 
     # List of requirements
-    tmpdir2 = tmpdir.join("2")
+    tmpdir2 = tmp_path.joinpath("2")
     mlflow.pytorch.save_model(
-        sequential_model, tmpdir2.strpath, extra_pip_requirements=[f"-r {req_file.strpath}", "b"]
+        sequential_model, tmpdir2, extra_pip_requirements=[f"-r {req_file}", "b"]
     )
-    _assert_pip_requirements(tmpdir2.strpath, [expected_mlflow_version, *default_reqs, "a", "b"])
+    _assert_pip_requirements(tmpdir2, [expected_mlflow_version, *default_reqs, "a", "b"])
 
     # Constraints file
-    tmpdir3 = tmpdir.join("3")
+    tmpdir3 = tmp_path.joinpath("3")
     mlflow.pytorch.save_model(
-        sequential_model, tmpdir3.strpath, extra_pip_requirements=[f"-c {req_file.strpath}", "b"]
+        sequential_model, tmpdir3, extra_pip_requirements=[f"-c {req_file}", "b"]
     )
     _assert_pip_requirements(
-        tmpdir3.strpath, [expected_mlflow_version, *default_reqs, "b", "-c constraints.txt"], ["a"]
+        tmpdir3, [expected_mlflow_version, *default_reqs, "b", "-c constraints.txt"], ["a"]
     )
 
 
@@ -463,16 +466,12 @@ def test_model_log_persists_specified_conda_env_in_mlflow_model_directory(
 ):
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.pytorch.log_model(
-            pytorch_model=sequential_model,
-            artifact_path=artifact_path,
+        model_info = mlflow.pytorch.log_model(
+            sequential_model,
+            artifact_path,
             conda_env=pytorch_custom_env,
         )
-        model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-        )
+        model_path = _download_artifact_from_uri(model_info.model_uri)
 
     pyfunc_conf = _get_flavor_configuration(model_path=model_path, flavor_name=pyfunc.FLAVOR_NAME)
     saved_conda_env_path = os.path.join(model_path, pyfunc_conf[pyfunc.ENV]["conda"])
@@ -492,16 +491,12 @@ def test_model_log_persists_requirements_in_mlflow_model_directory(
 ):
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.pytorch.log_model(
-            pytorch_model=sequential_model,
-            artifact_path=artifact_path,
+        model_info = mlflow.pytorch.log_model(
+            sequential_model,
+            artifact_path,
             conda_env=pytorch_custom_env,
         )
-        model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-        )
+        model_path = _download_artifact_from_uri(model_info.model_uri)
 
     saved_pip_req_path = os.path.join(model_path, "requirements.txt")
     _compare_conda_env_requirements(pytorch_custom_env, saved_pip_req_path)
@@ -519,12 +514,10 @@ def test_model_save_without_specified_conda_env_uses_default_env_with_expected_d
 def test_model_log_without_specified_conda_env_uses_default_env_with_expected_dependencies(
     sequential_model,
 ):
-    artifact_path = "model"
     with mlflow.start_run():
-        mlflow.pytorch.log_model(sequential_model, artifact_path)
-        model_uri = mlflow.get_artifact_uri(artifact_path)
+        model_info = mlflow.pytorch.log_model(sequential_model, "model")
 
-    _assert_pip_requirements(model_uri, mlflow.pytorch.get_default_pip_requirements())
+    _assert_pip_requirements(model_info.model_uri, mlflow.pytorch.get_default_pip_requirements())
 
 
 @pytest.mark.parametrize("scripted_model", [True, False])
@@ -542,8 +535,9 @@ def test_load_model_with_differing_pytorch_version_logs_warning(sequential_model
         log_messages.append(message_text % args % kwargs)
 
     loader_pytorch_version = "0.8.2"
-    with mock.patch("mlflow.pytorch._logger.warning") as warn_mock, mock.patch(
-        "torch.__version__", loader_pytorch_version
+    with (
+        mock.patch("mlflow.pytorch._logger.warning") as warn_mock,
+        mock.patch("torch.__version__", loader_pytorch_version),
     ):
         warn_mock.side_effect = custom_warn
         mlflow.pytorch.load_model(model_uri=model_path)
@@ -557,17 +551,20 @@ def test_load_model_with_differing_pytorch_version_logs_warning(sequential_model
 
 
 def test_pyfunc_model_serving_with_module_scoped_subclassed_model_and_default_conda_env(
-    module_scoped_subclassed_model, model_path, data
+    module_scoped_subclassed_model, data
 ):
-    mlflow.pytorch.save_model(
-        path=model_path,
-        pytorch_model=module_scoped_subclassed_model,
-        code_paths=[__file__],
-    )
+    with mlflow.start_run():
+        model_info = mlflow.pytorch.log_model(
+            module_scoped_subclassed_model,
+            "pytorch_model",
+            code_paths=[__file__],
+            input_example=data[0],
+        )
 
+    inference_payload = load_serving_example(model_info.model_uri)
     scoring_response = pyfunc_serve_and_score_model(
-        model_uri=model_path,
-        data=data[0],
+        model_uri=model_info.model_uri,
+        data=inference_payload,
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON,
         extra_args=["--env-manager", "local"],
     )
@@ -584,7 +581,6 @@ def test_pyfunc_model_serving_with_module_scoped_subclassed_model_and_default_co
 def test_save_model_with_wrong_codepaths_fails_correctly(
     module_scoped_subclassed_model, model_path, data
 ):
-    # pylint: disable=unused-argument
     with pytest.raises(TypeError, match="Argument code_paths should be a list, not <class 'str'>"):
         mlflow.pytorch.save_model(
             path=model_path, pytorch_model=module_scoped_subclassed_model, code_paths="some string"
@@ -592,17 +588,20 @@ def test_save_model_with_wrong_codepaths_fails_correctly(
 
 
 def test_pyfunc_model_serving_with_main_scoped_subclassed_model_and_custom_pickle_module(
-    main_scoped_subclassed_model, model_path, data
+    main_scoped_subclassed_model, data
 ):
-    mlflow.pytorch.save_model(
-        path=model_path,
-        pytorch_model=main_scoped_subclassed_model,
-        pickle_module=mlflow_pytorch_pickle_module,
-    )
+    with mlflow.start_run():
+        model_info = mlflow.pytorch.log_model(
+            main_scoped_subclassed_model,
+            "pytorch_model",
+            pickle_module=mlflow_pytorch_pickle_module,
+            input_example=data[0],
+        )
 
+    inference_payload = load_serving_example(model_info.model_uri)
     scoring_response = pyfunc_serve_and_score_model(
-        model_uri=model_path,
-        data=data[0],
+        model_uri=model_info.model_uri,
+        data=inference_payload,
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON,
         extra_args=["--env-manager", "local"],
     )
@@ -632,10 +631,9 @@ def test_load_model_succeeds_with_dependencies_specified_via_code_paths(
     # `mlflow.pytorch.load_model`
     class TorchValidatorModel(pyfunc.PythonModel):
         def load_context(self, context):
-            # pylint: disable=attribute-defined-outside-init
             self.pytorch_model = mlflow.pytorch.load_model(context.artifacts["pytorch_model"])
 
-        def predict(self, _, model_input):
+        def predict(self, context, model_input, params=None):
             with torch.no_grad():
                 input_tensor = torch.from_numpy(model_input.values.astype(np.float32))
                 output_tensor = self.pytorch_model(input_tensor)
@@ -643,22 +641,22 @@ def test_load_model_succeeds_with_dependencies_specified_via_code_paths(
 
     pyfunc_artifact_path = "pyfunc_model"
     with mlflow.start_run():
-        pyfunc.log_model(
-            artifact_path=pyfunc_artifact_path,
+        model_info = pyfunc.log_model(
+            pyfunc_artifact_path,
             python_model=TorchValidatorModel(),
             artifacts={"pytorch_model": model_path},
-        )
-        pyfunc_model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=pyfunc_artifact_path
-            )
+            input_example=data[0],
+            # save file into code_paths, otherwise after first model loading (happens when
+            # validating input_example) then we can not load the model again
+            code_paths=[__file__],
         )
 
     # Deploy the custom pyfunc model and ensure that it is able to successfully load its
     # constituent PyTorch model via `mlflow.pytorch.load_model`
+    inference_payload = load_serving_example(model_info.model_uri)
     scoring_response = pyfunc_serve_and_score_model(
-        model_uri=pyfunc_model_path,
-        data=data[0],
+        model_uri=model_info.model_uri,
+        data=inference_payload,
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON,
         extra_args=["--env-manager", "local"],
     )
@@ -690,13 +688,18 @@ def test_load_pyfunc_loads_torch_model_using_pickle_module_specified_at_save_tim
         imported_modules.append(module_name)
         return import_module_fn(module_name)
 
-    with mock.patch("importlib.import_module") as import_mock, mock.patch(
-        "torch.load"
-    ) as torch_load_mock:
+    with (
+        mock.patch("importlib.import_module") as import_mock,
+        mock.patch("torch.load") as torch_load_mock,
+    ):
         import_mock.side_effect = track_module_imports
         pyfunc.load_model(model_path)
 
-    torch_load_mock.assert_called_with(mock.ANY, pickle_module=custom_pickle_module)
+    expected_kwargs = {"pickle_module": custom_pickle_module}
+    if ENABLE_LEGACY_DESERIALIZATION:
+        expected_kwargs["weights_only"] = False
+
+    torch_load_mock.assert_called_with(mock.ANY, **expected_kwargs)
     assert custom_pickle_module.__name__ in imported_modules
 
 
@@ -707,14 +710,12 @@ def test_load_model_loads_torch_model_using_pickle_module_specified_at_save_time
 
     artifact_path = "pytorch_model"
     with mlflow.start_run():
-        mlflow.pytorch.log_model(
-            artifact_path=artifact_path,
-            pytorch_model=module_scoped_subclassed_model,
+        model_info = mlflow.pytorch.log_model(
+            module_scoped_subclassed_model,
+            artifact_path,
             pickle_module=custom_pickle_module,
         )
-        model_uri = "runs:/{run_id}/{artifact_path}".format(
-            run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-        )
+        model_uri = model_info.model_uri
 
     import_module_fn = importlib.import_module
     imported_modules = []
@@ -723,13 +724,18 @@ def test_load_model_loads_torch_model_using_pickle_module_specified_at_save_time
         imported_modules.append(module_name)
         return import_module_fn(module_name)
 
-    with mock.patch("importlib.import_module") as import_mock, mock.patch(
-        "torch.load"
-    ) as torch_load_mock:
+    with (
+        mock.patch("importlib.import_module") as import_mock,
+        mock.patch("torch.load") as torch_load_mock,
+    ):
         import_mock.side_effect = track_module_imports
         pyfunc.load_model(model_uri=model_uri)
 
-    torch_load_mock.assert_called_with(mock.ANY, pickle_module=custom_pickle_module)
+    expected_kwargs = {"pickle_module": custom_pickle_module}
+    if ENABLE_LEGACY_DESERIALIZATION:
+        expected_kwargs["weights_only"] = False
+
+    torch_load_mock.assert_called_with(mock.ANY, **expected_kwargs)
     assert custom_pickle_module.__name__ in imported_modules
 
 
@@ -776,14 +782,8 @@ def test_load_model_succeeds_when_data_is_model_file_instead_of_directory(
     """
     artifact_path = "pytorch_model"
     with mlflow.start_run():
-        mlflow.pytorch.log_model(
-            artifact_path=artifact_path, pytorch_model=module_scoped_subclassed_model
-        )
-        model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-        )
+        model_info = mlflow.pytorch.log_model(module_scoped_subclassed_model, artifact_path)
+        model_path = _download_artifact_from_uri(model_info.model_uri)
 
     model_conf_path = os.path.join(model_path, "MLmodel")
     model_conf = Model.load(model_conf_path)
@@ -813,9 +813,10 @@ def test_load_model_allows_user_to_override_pickle_module_via_keyword_argument(
         path=model_path, pytorch_model=module_scoped_subclassed_model, pickle_module=pickle
     )
 
-    with mock.patch("torch.load") as torch_load_mock, mock.patch(
-        "mlflow.pytorch._logger.warning"
-    ) as warn_mock:
+    with (
+        mock.patch("torch.load") as torch_load_mock,
+        mock.patch("mlflow.pytorch._logger.warning") as warn_mock,
+    ):
         mlflow.pytorch.load_model(model_uri=model_path, pickle_module=mlflow_pytorch_pickle_module)
         torch_load_mock.assert_called_with(mock.ANY, pickle_module=mlflow_pytorch_pickle_module)
         warn_mock.assert_any_call(mock.ANY, mlflow_pytorch_pickle_module.__name__, pickle.__name__)
@@ -849,12 +850,12 @@ def test_pyfunc_serve_and_score(data):
     train_model(model=model, data=data)
 
     with mlflow.start_run():
-        mlflow.pytorch.log_model(model, artifact_path="model")
-        model_uri = mlflow.get_artifact_uri("model")
+        model_info = mlflow.pytorch.log_model(model, "model", input_example=data[0])
 
+    inference_payload = load_serving_example(model_info.model_uri)
     resp = pyfunc_serve_and_score_model(
-        model_uri,
-        data[0],
+        model_info.model_uri,
+        inference_payload,
         pyfunc_scoring_server.CONTENT_TYPE_JSON,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
@@ -866,10 +867,12 @@ def test_pyfunc_serve_and_score(data):
 
 @pytest.mark.skipif(not _is_importable("transformers"), reason="This test requires transformers")
 def test_pyfunc_serve_and_score_transformers():
-    from transformers import BertModel, BertConfig  # pylint: disable=import-error
+    from transformers import BertConfig, BertModel
+
+    from mlflow.deployments import PredictionsResponse
 
     class MyBertModel(BertModel):
-        def forward(self, *args, **kwargs):  # pylint: disable=arguments-differ
+        def forward(self, *args, **kwargs):
             return super().forward(*args, **kwargs).last_hidden_state
 
     model = MyBertModel(
@@ -883,19 +886,20 @@ def test_pyfunc_serve_and_score_transformers():
     )
     model.eval()
 
-    with mlflow.start_run():
-        mlflow.pytorch.log_model(model, artifact_path="model")
-        model_uri = mlflow.get_artifact_uri("model")
-
     input_ids = model.dummy_inputs["input_ids"]
-    data = json.dumps({"inputs": input_ids.tolist()})
+
+    with mlflow.start_run():
+        model_info = mlflow.pytorch.log_model(
+            model, "model", input_example=np.array(input_ids.tolist())
+        )
+
+    inference_payload = load_serving_example(model_info.model_uri)
     resp = pyfunc_serve_and_score_model(
-        model_uri,
-        data,
+        model_info.model_uri,
+        inference_payload,
         pyfunc_scoring_server.CONTENT_TYPE_JSON,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
-    from mlflow.deployments import PredictionsResponse
 
     scores = PredictionsResponse.from_json(resp.content.decode("utf-8")).get_predictions(
         predictions_format="ndarray"
@@ -904,12 +908,12 @@ def test_pyfunc_serve_and_score_transformers():
 
 
 @pytest.fixture
-def create_requirements_file(tmpdir):
+def create_requirements_file(tmp_path):
     requirement_file_name = "requirements.txt"
-    fp = tmpdir.join(requirement_file_name)
+    fp = tmp_path.joinpath(requirement_file_name)
     test_string = "mlflow"
-    fp.write(test_string)
-    return fp.strpath, test_string
+    fp.write_text(test_string)
+    return str(fp), test_string
 
 
 @pytest.mark.parametrize("scripted_model", [True, False])
@@ -917,8 +921,8 @@ def test_requirements_file_log_model(create_requirements_file, sequential_model)
     requirements_file, content_expected = create_requirements_file
     with mlflow.start_run():
         mlflow.pytorch.log_model(
-            pytorch_model=sequential_model,
-            artifact_path="models",
+            sequential_model,
+            "models",
             requirements_file=requirements_file,
         )
 
@@ -977,53 +981,55 @@ def test_requirements_file_save_model(create_requirements_file, sequential_model
 
 @pytest.mark.parametrize("scripted_model", [True, False])
 def test_log_model_invalid_requirement_file_path(sequential_model):
-    with mlflow.start_run(), pytest.raises(MlflowException, match="FileNotFoundError"):
+    with (
+        mlflow.start_run(),
+        pytest.raises(MlflowException, match="No such file or directory: 'non_existing_file.txt'"),
+    ):
         mlflow.pytorch.log_model(
-            pytorch_model=sequential_model,
-            artifact_path="models",
+            sequential_model,
+            "models",
             requirements_file="non_existing_file.txt",
         )
 
 
 @pytest.mark.parametrize("scripted_model", [True, False])
 def test_log_model_invalid_requirement_file_type(sequential_model):
-    with mlflow.start_run(), pytest.raises(
-        TypeError, match="Path to requirements file should be a string"
+    with (
+        mlflow.start_run(),
+        pytest.raises(TypeError, match="Path to requirements file should be a string"),
     ):
         mlflow.pytorch.log_model(
-            pytorch_model=sequential_model,
-            artifact_path="models",
+            sequential_model,
+            "models",
             requirements_file=["non_existing_file.txt"],
         )
 
 
-def test_save_model_emits_deprecation_warning_for_requirements_file(tmpdir):
-    reqs_file = tmpdir.join("requirements.txt")
-    reqs_file.write("torch")
+def test_save_model_emits_deprecation_warning_for_requirements_file(tmp_path):
+    reqs_file = tmp_path.joinpath("requirements.txt")
+    reqs_file.write_text("torch")
     with pytest.warns(FutureWarning, match="`requirements_file` has been deprecated"):
         mlflow.pytorch.save_model(
             get_sequential_model(),
-            tmpdir.join("model"),
-            requirements_file=reqs_file.strpath,
+            tmp_path.joinpath("model"),
+            requirements_file=str(reqs_file),
         )
 
 
 @pytest.fixture
-def create_extra_files(tmpdir):
-    fp1 = tmpdir.join("extra1.txt")
-    fp2 = tmpdir.join("extra2.txt")
-    fp1.write("1")
-    fp2.write("2")
-    return [fp1.strpath, fp2.strpath], ["1", "2"]
+def create_extra_files(tmp_path):
+    fp1 = tmp_path.joinpath("extra1.txt")
+    fp2 = tmp_path.joinpath("extra2.txt")
+    fp1.write_text("1")
+    fp2.write_text("2")
+    return [str(fp1), str(fp2)], ["1", "2"]
 
 
 @pytest.mark.parametrize("scripted_model", [True, False])
 def test_extra_files_log_model(create_extra_files, sequential_model):
     extra_files, contents_expected = create_extra_files
     with mlflow.start_run():
-        mlflow.pytorch.log_model(
-            pytorch_model=sequential_model, artifact_path="models", extra_files=extra_files
-        )
+        mlflow.pytorch.log_model(sequential_model, "models", extra_files=extra_files)
 
         model_uri = "runs:/{run_id}/{model_path}".format(
             run_id=mlflow.active_run().info.run_id, model_path="models"
@@ -1068,22 +1074,26 @@ def test_extra_files_save_model(create_extra_files, sequential_model):
 
 @pytest.mark.parametrize("scripted_model", [True, False])
 def test_log_model_invalid_extra_file_path(sequential_model):
-    with mlflow.start_run(), pytest.raises(MlflowException, match="FileNotFoundError"):
+    with (
+        mlflow.start_run(),
+        pytest.raises(MlflowException, match="No such file or directory: 'non_existing_file.txt'"),
+    ):
         mlflow.pytorch.log_model(
-            pytorch_model=sequential_model,
-            artifact_path="models",
+            sequential_model,
+            "models",
             extra_files=["non_existing_file.txt"],
         )
 
 
 @pytest.mark.parametrize("scripted_model", [True, False])
 def test_log_model_invalid_extra_file_type(sequential_model):
-    with mlflow.start_run(), pytest.raises(
-        TypeError, match="Extra files argument should be a list"
+    with (
+        mlflow.start_run(),
+        pytest.raises(TypeError, match="Extra files argument should be a list"),
     ):
         mlflow.pytorch.log_model(
-            pytorch_model=sequential_model,
-            artifact_path="models",
+            sequential_model,
+            "models",
             extra_files="non_existing_file.txt",
         )
 
@@ -1174,15 +1184,15 @@ def test_log_state_dict(sequential_model, data):
 @pytest.mark.parametrize("scripted_model", [True, False])
 def test_log_model_with_code_paths(sequential_model):
     artifact_path = "model"
-    with mlflow.start_run(), mock.patch(
-        "mlflow.pytorch._add_code_from_conf_to_system_path"
-    ) as add_mock:
-        mlflow.pytorch.log_model(
-            sequential_model, artifact_path=artifact_path, code_paths=[__file__]
+    with (
+        mlflow.start_run(),
+        mock.patch("mlflow.pytorch._add_code_from_conf_to_system_path") as add_mock,
+    ):
+        model_info = mlflow.pytorch.log_model(
+            sequential_model, artifact_path, code_paths=[__file__]
         )
-        model_uri = mlflow.get_artifact_uri(artifact_path)
-        _compare_logged_code_paths(__file__, model_uri, mlflow.pytorch.FLAVOR_NAME)
-        mlflow.pytorch.load_model(model_uri)
+        _compare_logged_code_paths(__file__, model_info.model_uri, mlflow.pytorch.FLAVOR_NAME)
+        mlflow.pytorch.load_model(model_info.model_uri)
         add_mock.assert_called()
 
 
@@ -1210,12 +1220,57 @@ def test_model_log_with_metadata(sequential_model):
     artifact_path = "model"
 
     with mlflow.start_run():
-        mlflow.pytorch.log_model(
+        model_info = mlflow.pytorch.log_model(
             sequential_model,
-            artifact_path=artifact_path,
+            artifact_path,
             metadata={"metadata_key": "metadata_value"},
         )
-        model_uri = mlflow.get_artifact_uri(artifact_path)
 
-    reloaded_model = mlflow.pyfunc.load_model(model_uri=model_uri)
+    reloaded_model = mlflow.pyfunc.load_model(model_uri=model_info.model_uri)
     assert reloaded_model.metadata.metadata["metadata_key"] == "metadata_value"
+
+
+@pytest.mark.parametrize("scripted_model", [True, False])
+def test_model_log_with_signature_inference(sequential_model, data):
+    artifact_path = "model"
+    example_ = data[0].head(3).values.astype(np.float32)
+
+    with mlflow.start_run():
+        model_info = mlflow.pytorch.log_model(
+            sequential_model, artifact_path, input_example=example_
+        )
+
+    assert model_info.signature == ModelSignature(
+        inputs=Schema([TensorSpec(np.dtype("float32"), (-1, 4))]),
+        outputs=Schema([TensorSpec(np.dtype("float32"), (-1, 1))]),
+    )
+    inference_payload = load_serving_example(model_info.model_uri)
+    response = pyfunc_serve_and_score_model(
+        model_info.model_uri,
+        inference_payload,
+        pyfunc_scoring_server.CONTENT_TYPE_JSON,
+        extra_args=["--env-manager", "local"],
+    )
+    assert response.status_code == 200
+    deployed_model_preds = pd.DataFrame(json.loads(response.content)["predictions"])
+    np.testing.assert_array_almost_equal(
+        deployed_model_preds.values[:, 0],
+        _predict(model=sequential_model, data=(data[0].head(3), data[1].head(3))),
+        decimal=4,
+    )
+
+
+@pytest.mark.parametrize("scripted_model", [False])
+def test_load_model_to_device(sequential_model):
+    with mock.patch("mlflow.pytorch._load_model") as load_model_mock:
+        with mlflow.start_run():
+            model_info = mlflow.pytorch.log_model(sequential_model, "pytorch")
+            model_config = {"device": "cuda"}
+            if ENABLE_LEGACY_DESERIALIZATION:
+                model_config["weights_only"] = False
+
+            mlflow.pyfunc.load_model(model_uri=model_info.model_uri, model_config=model_config)
+
+            load_model_mock.assert_called_with(mock.ANY, **model_config)
+            mlflow.pytorch.load_model(model_uri=model_info.model_uri, **model_config)
+            load_model_mock.assert_called_with(path=mock.ANY, **model_config)

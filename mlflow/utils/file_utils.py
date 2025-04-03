@@ -1,38 +1,120 @@
+import atexit
 import codecs
 import errno
+import fnmatch
 import gzip
+import json
+import logging
+import math
 import os
+import pathlib
 import posixpath
 import shutil
+import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
-import stat
-import pathlib
-
+import time
 import urllib.parse
 import urllib.request
+import uuid
+from concurrent.futures import as_completed
+from contextlib import contextmanager
+from dataclasses import dataclass
+from subprocess import CalledProcessError, TimeoutExpired
+from typing import Optional, Union
 from urllib.parse import unquote
 from urllib.request import pathname2url
 
-import atexit
-
 import yaml
 
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
+
 try:
-    from yaml import CSafeLoader as YamlSafeLoader, CSafeDumper as YamlSafeDumper
+    from yaml import CSafeDumper as YamlSafeDumper
+    from yaml import CSafeLoader as YamlSafeLoader
 except ImportError:
-    from yaml import SafeLoader as YamlSafeLoader, SafeDumper as YamlSafeDumper
+    from yaml import SafeDumper as YamlSafeDumper
+    from yaml import SafeLoader as YamlSafeLoader
 
 from mlflow.entities import FileInfo
-from mlflow.exceptions import MissingConfigException
-from mlflow.utils.rest_utils import cloud_storage_http_request, augmented_raise_for_status
-from mlflow.utils.process import cache_return_value_per_process
-from mlflow.utils import merge_dicts
-from mlflow.utils.databricks_utils import _get_dbutils
+from mlflow.environment_variables import (
+    _MLFLOW_MPD_NUM_RETRIES,
+    _MLFLOW_MPD_RETRY_INTERVAL_SECONDS,
+    MLFLOW_DOWNLOAD_CHUNK_TIMEOUT,
+    MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR,
+)
+from mlflow.exceptions import MissingConfigException, MlflowException
+from mlflow.protos.databricks_artifacts_pb2 import ArtifactCredentialType
+from mlflow.utils import download_cloud_file_chunk, merge_dicts
+from mlflow.utils.databricks_utils import (
+    get_databricks_local_temp_dir,
+    get_databricks_nfs_temp_dir,
+)
 from mlflow.utils.os import is_windows
+from mlflow.utils.process import cache_return_value_per_process
+from mlflow.utils.request_utils import cloud_storage_http_request, download_chunk
+from mlflow.utils.rest_utils import augmented_raise_for_status
 
 ENCODING = "utf-8"
+_PROGRESS_BAR_DISPLAY_THRESHOLD = 500_000_000  # 500 MB
+
+_logger = logging.getLogger(__name__)
+
+
+class ArtifactProgressBar:
+    def __init__(self, desc, total, step, **kwargs) -> None:
+        self.desc = desc
+        self.total = total
+        self.step = step
+        self.pbar = None
+        self.progress = 0
+        self.kwargs = kwargs
+
+    def set_pbar(self):
+        if MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR.get():
+            try:
+                from tqdm.auto import tqdm
+
+                self.pbar = tqdm(total=self.total, desc=self.desc, **self.kwargs)
+            except ImportError:
+                pass
+
+    @classmethod
+    def chunks(cls, file_size, desc, chunk_size):
+        bar = cls(
+            desc,
+            total=file_size,
+            step=chunk_size,
+            unit="iB",
+            unit_scale=True,
+            unit_divisor=1024,
+            miniters=1,
+        )
+        if file_size >= _PROGRESS_BAR_DISPLAY_THRESHOLD:
+            bar.set_pbar()
+        return bar
+
+    @classmethod
+    def files(cls, desc, total):
+        bar = cls(desc, total=total, step=1)
+        bar.set_pbar()
+        return bar
+
+    def update(self):
+        if self.pbar:
+            update_step = min(self.total - self.progress, self.step)
+            self.pbar.update(update_step)
+            self.pbar.refresh()
+            self.progress += update_step
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        if self.pbar:
+            self.pbar.close()
 
 
 def is_directory(name):
@@ -48,17 +130,19 @@ def exists(name):
 
 
 def list_all(root, filter_func=lambda x: True, full_path=False):
-    """
-    List all entities directly under 'dir_name' that satisfy 'filter_func'
+    """List all entities directly under 'dir_name' that satisfy 'filter_func'
 
-    :param root: Name of directory to start search
-    :param filter_func: function or lambda that takes path
-    :param full_path: If True will return results as full path including `root`
+    Args:
+        root: Name of directory to start search.
+        filter_func: function or lambda that takes path.
+        full_path: If True will return results as full path including `root`.
 
-    :return: list of all files or directories that satisfy the criteria.
+    Returns:
+        list of all files or directories that satisfy the criteria.
+
     """
     if not is_directory(root):
-        raise Exception("Invalid parent directory '%s'" % root)
+        raise Exception(f"Invalid parent directory '{root}'")
     matches = [x for x in os.listdir(root) if filter_func(os.path.join(root, x))]
     return [os.path.join(root, m) for m in matches] if full_path else matches
 
@@ -68,10 +152,12 @@ def list_subdirs(dir_name, full_path=False):
     Equivalent to UNIX command:
       ``find $dir_name -depth 1 -type d``
 
-    :param dir_name: Name of directory to start search
-    :param full_path: If True will return results as full path including `root`
+    Args:
+        dir_name: Name of directory to start search.
+        full_path: If True will return results as full path including `root`.
 
-    :return: list of all directories directly under 'dir_name'
+    Returns:
+        list of all directories directly under 'dir_name'.
     """
     return list_all(dir_name, os.path.isdir, full_path)
 
@@ -81,41 +167,45 @@ def list_files(dir_name, full_path=False):
     Equivalent to UNIX command:
       ``find $dir_name -depth 1 -type f``
 
-    :param dir_name: Name of directory to start search
-    :param full_path: If True will return results as full path including `root`
+    Args:
+        dir_name: Name of directory to start search.
+        full_path: If True will return results as full path including `root`.
 
-    :return: list of all files directly under 'dir_name'
+    Returns:
+        list of all files directly under 'dir_name'.
     """
     return list_all(dir_name, os.path.isfile, full_path)
 
 
 def find(root, name, full_path=False):
-    """
-    Search for a file in a root directory. Equivalent to:
+    """Search for a file in a root directory. Equivalent to:
       ``find $root -name "$name" -depth 1``
 
-    :param root: Name of root directory for find
-    :param name: Name of file or directory to find directly under root directory
-    :param full_path: If True will return results as full path including `root`
+    Args:
+        root: Name of root directory for find.
+        name: Name of file or directory to find directly under root directory.
+        full_path: If True will return results as full path including `root`.
 
-    :return: list of matching files or directories
+    Returns:
+        list of matching files or directories.
     """
     path_name = os.path.join(root, name)
     return list_all(root, lambda x: x == path_name, full_path)
 
 
 def mkdir(root, name=None):
-    """
-    Make directory with name "root/name", or just "root" if name is None.
+    """Make directory with name "root/name", or just "root" if name is None.
 
-    :param root: Name of parent directory
-    :param name: Optional name of leaf directory
+    Args:
+        root: Name of parent directory.
+        name: Optional name of leaf directory.
 
-    :return: Path to created directory
+    Returns:
+        Path to created directory.
     """
     target = os.path.join(root, name) if name is not None else root
     try:
-        os.makedirs(target)
+        os.makedirs(target, exist_ok=True)
     except OSError as e:
         if e.errno != errno.EEXIST or not os.path.isdir(target):
             raise e
@@ -132,50 +222,55 @@ def make_containing_dirs(path):
         os.makedirs(dir_name)
 
 
-def write_yaml(root, file_name, data, overwrite=False, sort_keys=True):
-    """
-    Write dictionary data in yaml format.
+def write_yaml(root, file_name, data, overwrite=False, sort_keys=True, ensure_yaml_extension=True):
+    """Write dictionary data in yaml format.
 
-    :param root: Directory name.
-    :param file_name: Desired file name. Will automatically add .yaml extension if not given
-    :param data: data to be dumped as yaml format
-    :param overwrite: If True, will overwrite existing files
+    Args:
+        root: Directory name.
+        file_name: Desired file name.
+        data: Data to be dumped as yaml format.
+        overwrite: If True, will overwrite existing files.
+        sort_keys: Whether to sort the keys when writing the yaml file.
+        ensure_yaml_extension: If True, will automatically add .yaml extension if not given.
     """
     if not exists(root):
-        raise MissingConfigException("Parent directory '%s' does not exist." % root)
+        raise MissingConfigException(f"Parent directory '{root}' does not exist.")
 
     file_path = os.path.join(root, file_name)
-    yaml_file_name = file_path if file_path.endswith(".yaml") else file_path + ".yaml"
+    yaml_file_name = file_path
+    if ensure_yaml_extension and not file_path.endswith(".yaml"):
+        yaml_file_name = file_path + ".yaml"
 
     if exists(yaml_file_name) and not overwrite:
         raise Exception(f"Yaml file '{file_path}' exists as '{yaml_file_name}")
 
-    try:
-        with codecs.open(yaml_file_name, mode="w", encoding=ENCODING) as yaml_file:
-            yaml.dump(
-                data,
-                yaml_file,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=sort_keys,
-                Dumper=YamlSafeDumper,
-            )
-    except Exception as e:
-        raise e
+    with codecs.open(yaml_file_name, mode="w", encoding=ENCODING) as yaml_file:
+        yaml.dump(
+            data,
+            yaml_file,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=sort_keys,
+            Dumper=YamlSafeDumper,
+        )
 
 
-def overwrite_yaml(root, file_name, data):
-    """
-    Safely overwrites a preexisting yaml file, ensuring that file contents are not deleted or
+def overwrite_yaml(root, file_name, data, ensure_yaml_extension=True):
+    """Safely overwrites a preexisting yaml file, ensuring that file contents are not deleted or
     corrupted if the write fails. This is achieved by writing contents to a temporary file
     and moving the temporary file to replace the preexisting file, rather than opening the
     preexisting file for a direct write.
 
-    :param root: Directory name.
-    :param file_name: File name. Expects to have '.yaml' extension.
-    :param data: The data to write, represented as a dictionary.
+    Args:
+        root: Directory name.
+        file_name: File name.
+        data: The data to write, represented as a dictionary.
+        ensure_yaml_extension: If True, Will automatically add .yaml extension if not given.
+
     """
     tmp_file_path = None
+    original_file_path = os.path.join(root, file_name)
+    original_file_mode = os.stat(original_file_path).st_mode
     try:
         tmp_file_fd, tmp_file_path = tempfile.mkstemp(suffix="file.yaml")
         os.close(tmp_file_fd)
@@ -185,24 +280,25 @@ def overwrite_yaml(root, file_name, data):
             data=data,
             overwrite=True,
             sort_keys=True,
+            ensure_yaml_extension=ensure_yaml_extension,
         )
-        shutil.move(
-            tmp_file_path,
-            os.path.join(root, file_name),
-        )
+        shutil.move(tmp_file_path, original_file_path)
+        # restores original file permissions, see https://docs.python.org/3/library/tempfile.html#tempfile.mkstemp
+        os.chmod(original_file_path, original_file_mode)
     finally:
         if tmp_file_path is not None and os.path.exists(tmp_file_path):
             os.remove(tmp_file_path)
 
 
 def read_yaml(root, file_name):
-    """
-    Read data from yaml file and return as dictionary
+    """Read data from yaml file and return as dictionary
 
-    :param root: Directory name
-    :param file_name: File name. Expects to have '.yaml' extension
+    Args:
+        root: Directory name.
+        file_name: File name. Expects to have '.yaml' extension.
 
-    :return: Data in yaml file as dictionary
+    Returns:
+        Data in yaml file as dictionary.
     """
     if not exists(root):
         raise MissingConfigException(
@@ -211,12 +307,9 @@ def read_yaml(root, file_name):
 
     file_path = os.path.join(root, file_name)
     if not exists(file_path):
-        raise MissingConfigException("Yaml file '%s' does not exist." % file_path)
-    try:
-        with codecs.open(file_path, mode="r", encoding=ENCODING) as yaml_file:
-            return yaml.load(yaml_file, Loader=YamlSafeLoader)
-    except Exception as e:
-        raise e
+        raise MissingConfigException(f"Yaml file '{file_path}' does not exist.")
+    with codecs.open(file_path, mode="r", encoding=ENCODING) as yaml_file:
+        return yaml.load(yaml_file, Loader=YamlSafeLoader)
 
 
 class UniqueKeyLoader(YamlSafeLoader):
@@ -231,33 +324,34 @@ class UniqueKeyLoader(YamlSafeLoader):
 
 
 def render_and_merge_yaml(root, template_name, context_name):
-    """
-    Renders a Jinja2-templated YAML file based on a YAML context file, merge them, and return
+    """Renders a Jinja2-templated YAML file based on a YAML context file, merge them, and return
     result as a dictionary.
 
-    :param root: Root directory of the YAML files
-    :param template_name: Name of the template file
-    :param context_name: Name of the context file
-    :return: Data in yaml file as dictionary
+    Args:
+        root: Root directory of the YAML files.
+        template_name: Name of the template file.
+        context_name: Name of the context file.
+
+    Returns:
+        Data in yaml file as dictionary.
     """
-    import jinja2
+    from jinja2 import FileSystemLoader, StrictUndefined
+    from jinja2.sandbox import SandboxedEnvironment
 
     template_path = os.path.join(root, template_name)
     context_path = os.path.join(root, context_name)
 
     for path in (template_path, context_path):
         if not pathlib.Path(path).is_file():
-            raise MissingConfigException("Yaml file '%s' does not exist." % path)
+            raise MissingConfigException(f"Yaml file '{path}' does not exist.")
 
-    j2_env = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(root, encoding=ENCODING),
-        undefined=jinja2.StrictUndefined,
+    j2_env = SandboxedEnvironment(
+        loader=FileSystemLoader(root, encoding=ENCODING),
+        undefined=StrictUndefined,
         line_comment_prefix="#",
     )
 
     def from_json(input_var):
-        import json
-
         with open(input_var, encoding="utf-8") as f:
             return json.load(f)
 
@@ -274,18 +368,20 @@ def render_and_merge_yaml(root, template_name, context_name):
 
 
 def read_parquet_as_pandas_df(data_parquet_path: str):
-    """
-    Deserialize and load the specified parquet file as a Pandas DataFrame.
+    """Deserialize and load the specified parquet file as a Pandas DataFrame.
 
-    :param data_parquet_path: String, path object (implementing os.PathLike[str]),
-    or file-like object implementing a binary read() function. The string
-    could be a URL. Valid URL schemes include http, ftp, s3, gs, and file.
-    For file URLs, a host is expected. A local file could
-    be: file://localhost/path/to/table.parquet. A file URL can also be a path to a
-    directory that contains multiple partitioned parquet files. Pyarrow
-    support paths to directories as well as file URLs. A directory
-    path could be: file://localhost/path/to/tables or s3://bucket/partition_dir.
-    :return: pandas dataframe
+    Args:
+        data_parquet_path: String, path object (implementing os.PathLike[str]),
+            or file-like object implementing a binary read() function. The string
+            could be a URL. Valid URL schemes include http, ftp, s3, gs, and file.
+            For file URLs, a host is expected. A local file could
+            be: file://localhost/path/to/table.parquet. A file URL can also be a path to a
+            directory that contains multiple partitioned parquet files. Pyarrow
+            support paths to directories as well as file URLs. A directory
+            path could be: file://localhost/path/to/tables or s3://bucket/partition_dir.
+
+    Returns:
+        pandas dataframe
     """
     import pandas as pd
 
@@ -293,12 +389,13 @@ def read_parquet_as_pandas_df(data_parquet_path: str):
 
 
 def write_pandas_df_as_parquet(df, data_parquet_path: str):
-    """
-    Write a DataFrame to the binary parquet format.
+    """Write a DataFrame to the binary parquet format.
 
-    :param df: pandas data frame.
-    :param data_parquet_path: String, path object (implementing os.PathLike[str]),
-    or file-like object implementing a binary write() function.
+    Args:
+        df: pandas data frame.
+        data_parquet_path: String, path object (implementing os.PathLike[str]),
+            or file-like object implementing a binary write() function.
+
     """
     df.to_parquet(data_parquet_path, engine="pyarrow")
 
@@ -311,7 +408,7 @@ class TempDir:
         self._remove = remove_on_exit
 
     def __enter__(self):
-        self._path = os.path.abspath(tempfile.mkdtemp())
+        self._path = os.path.abspath(create_tmp_dir())
         assert os.path.exists(self._path)
         if self._chdr:
             self._dir = os.path.abspath(os.getcwd())
@@ -326,20 +423,21 @@ class TempDir:
             shutil.rmtree(self._path)
 
         assert not self._remove or not os.path.exists(self._path)
-        assert os.path.exists(os.getcwd())
 
     def path(self, *path):
         return os.path.join("./", *path) if self._chdr else os.path.join(self._path, *path)
 
 
 def read_file_lines(parent_path, file_name):
-    """
-    Return the contents of the file as an array where each element is a separate line.
+    """Return the contents of the file as an array where each element is a separate line.
 
-    :param parent_path: Full path to the directory that contains the file.
-    :param file_name: Leaf file name.
+    Args:
+        parent_path: Full path to the directory that contains the file.
+        file_name: Leaf file name.
 
-    :return: All lines in the file as an array.
+    Returns:
+        All lines in the file as an array.
+
     """
     file_path = os.path.join(parent_path, file_name)
     with codecs.open(file_path, mode="r", encoding=ENCODING) as f:
@@ -347,13 +445,15 @@ def read_file_lines(parent_path, file_name):
 
 
 def read_file(parent_path, file_name):
-    """
-    Return the contents of the file.
+    """Return the contents of the file.
 
-    :param parent_path: Full path to the directory that contains the file.
-    :param file_name: Leaf file name.
+    Args:
+        parent_path: Full path to the directory that contains the file.
+        file_name: Leaf file name.
 
-    :return: The contents of the file.
+    Returns:
+        The contents of the file.
+
     """
     file_path = os.path.join(parent_path, file_name)
     with codecs.open(file_path, mode="r", encoding=ENCODING) as f:
@@ -361,12 +461,14 @@ def read_file(parent_path, file_name):
 
 
 def get_file_info(path, rel_path):
-    """
-    Returns file meta data : location, size, ... etc
+    """Returns file meta data : location, size, ... etc
 
-    :param path: Path to artifact
+    Args:
+        path: Path to artifact.
+        rel_path: Relative path.
 
-    :return: `FileInfo` object
+    Returns:
+        `FileInfo` object
     """
     if is_directory(path):
         return FileInfo(rel_path, True, None)
@@ -375,13 +477,14 @@ def get_file_info(path, rel_path):
 
 
 def get_relative_path(root_path, target_path):
-    """
-    Remove root path common prefix and return part of `path` relative to `root_path`.
+    """Remove root path common prefix and return part of `path` relative to `root_path`.
 
-    :param root_path: Root path
-    :param target_path: Desired path for common prefix removal
+    Args:
+        root_path: Root path.
+        target_path: Desired path for common prefix removal.
 
-    :return: Path relative to root_path
+    Returns:
+        Path relative to root_path.
     """
     if len(root_path) > len(target_path):
         raise Exception(f"Root path '{root_path}' longer than target path '{target_path}'")
@@ -415,24 +518,29 @@ def make_tarfile(output_filename, source_dir, archive_name, custom_filter=None):
             tar.add(source_dir, arcname=archive_name, filter=_filter_timestamps)
         # When gzipping the tar, don't include the tar's filename or modification time in the
         # zipped archive (see https://docs.python.org/3/library/gzip.html#gzip.GzipFile)
-        with gzip.GzipFile(
-            filename="", fileobj=open(output_filename, "wb"), mode="wb", mtime=0
-        ) as gzipped_tar, open(unzipped_filename, "rb") as tar:
+        with (
+            gzip.GzipFile(
+                filename="", fileobj=open(output_filename, "wb"), mode="wb", mtime=0
+            ) as gzipped_tar,
+            open(unzipped_filename, "rb") as tar,
+        ):
             gzipped_tar.write(tar.read())
     finally:
         os.close(unzipped_file_handle)
 
 
 def _copy_project(src_path, dst_path=""):
-    """
-    Internal function used to copy MLflow project during development.
+    """Internal function used to copy MLflow project during development.
 
     Copies the content of the whole directory tree except patterns defined in .dockerignore.
     The MLflow is assumed to be accessible as a local directory in this case.
 
+    Args:
+        src_path: Path to the original MLflow project
+        dst_path: MLflow will be copied here
 
-    :param dst_path: MLflow will be copied here
-    :return: name of the MLflow project directory
+    Returns:
+        Name of the MLflow project directory.
     """
 
     def _docker_ignore(mlflow_root):
@@ -443,8 +551,6 @@ def _copy_project(src_path, dst_path=""):
                 patterns = [x.strip() for x in f.readlines()]
 
         def ignore(_, names):
-            import fnmatch
-
             res = set()
             for p in patterns:
                 res.update(set(fnmatch.filter(names, p)))
@@ -454,8 +560,8 @@ def _copy_project(src_path, dst_path=""):
 
     mlflow_dir = "mlflow-project"
     # check if we have project root
-    assert os.path.isfile(os.path.join(src_path, "setup.py")), "file not found " + str(
-        os.path.abspath(os.path.join(src_path, "setup.py"))
+    assert os.path.isfile(os.path.join(src_path, "pyproject.toml")), "file not found " + str(
+        os.path.abspath(os.path.join(src_path, "pyproject.toml"))
     )
     shutil.copytree(src_path, os.path.join(dst_path, mlflow_dir), ignore=_docker_ignore(src_path))
     return mlflow_dir
@@ -463,7 +569,8 @@ def _copy_project(src_path, dst_path=""):
 
 def _copy_file_or_tree(src, dst, dst_dir=None):
     """
-    :return: The path to the copied artifacts, relative to `dst`
+    Returns:
+        The path to the copied artifacts, relative to `dst`.
     """
     dst_subpath = os.path.basename(os.path.abspath(src))
     if dst_dir is not None:
@@ -480,11 +587,14 @@ def _copy_file_or_tree(src, dst, dst_dir=None):
 
 
 def _get_local_project_dir_size(project_path):
-    """
-    Internal function for reporting the size of a local project directory before copying to
+    """Internal function for reporting the size of a local project directory before copying to
     destination for cli logging reporting to stdout.
-    :param project_path: local path of the project directory
-    :return: directory file sizes in KB, rounded to single decimal point for legibility
+
+    Args:
+        project_path: local path of the project directory
+
+    Returns:
+        directory file sizes in KB, rounded to single decimal point for legibility
     """
 
     total_size = 0
@@ -588,6 +698,143 @@ def download_file_using_http_uri(http_uri, download_path, chunk_size=100000000, 
                 output_file.write(chunk)
 
 
+@dataclass(frozen=True)
+class _Chunk:
+    index: int
+    start: int
+    end: int
+    path: str
+
+
+def _yield_chunks(path, file_size, chunk_size):
+    num_requests = int(math.ceil(file_size / float(chunk_size)))
+    for i in range(num_requests):
+        range_start = i * chunk_size
+        range_end = min(range_start + chunk_size - 1, file_size - 1)
+        yield _Chunk(i, range_start, range_end, path)
+
+
+def parallelized_download_file_using_http_uri(
+    thread_pool_executor,
+    http_uri,
+    download_path,
+    remote_file_path,
+    file_size,
+    uri_type,
+    chunk_size,
+    env,
+    headers=None,
+):
+    """
+    Downloads a file specified using the `http_uri` to a local `download_path`. This function
+    sends multiple requests in parallel each specifying its own desired byte range as a header,
+    then reconstructs the file from the downloaded chunks. This allows for downloads of large files
+    without OOM risk.
+
+    Note : This function is meant to download files using presigned urls from various cloud
+            providers.
+    Returns a dict of chunk index : exception, if one was thrown for that index.
+    """
+
+    def run_download(chunk: _Chunk):
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    download_cloud_file_chunk.__file__,
+                    "--range-start",
+                    str(chunk.start),
+                    "--range-end",
+                    str(chunk.end),
+                    "--headers",
+                    json.dumps(headers or {}),
+                    "--download-path",
+                    download_path,
+                    "--http-uri",
+                    http_uri,
+                ],
+                text=True,
+                check=True,
+                capture_output=True,
+                timeout=MLFLOW_DOWNLOAD_CHUNK_TIMEOUT.get(),
+                env=env,
+            )
+        except (TimeoutExpired, CalledProcessError) as e:
+            raise MlflowException(
+                f"""
+----- stdout -----
+{e.stdout.strip()}
+
+----- stderr -----
+{e.stderr.strip()}
+"""
+            ) from e
+
+    chunks = _yield_chunks(remote_file_path, file_size, chunk_size)
+    # Create file if it doesn't exist or erase the contents if it does. We should do this here
+    # before sending to the workers so they can each individually seek to their respective positions
+    # and write chunks without overwriting.
+    with open(download_path, "w"):
+        pass
+    if uri_type == ArtifactCredentialType.GCP_SIGNED_URL or uri_type is None:
+        chunk = next(chunks)
+        # GCP files could be transcoded, in which case the range header is ignored.
+        # Test if this is the case by downloading one chunk and seeing if it's larger than the
+        # requested size. If yes, let that be the file; if not, continue downloading more chunks.
+        download_chunk(
+            range_start=chunk.start,
+            range_end=chunk.end,
+            headers=headers,
+            download_path=download_path,
+            http_uri=http_uri,
+        )
+        downloaded_size = os.path.getsize(download_path)
+        # If downloaded size was equal to the chunk size it would have been downloaded serially,
+        # so we don't need to consider this here
+        if downloaded_size > chunk_size:
+            return {}
+
+    futures = {thread_pool_executor.submit(run_download, chunk): chunk for chunk in chunks}
+    failed_downloads = {}
+    with ArtifactProgressBar.chunks(file_size, f"Downloading {download_path}", chunk_size) as pbar:
+        for future in as_completed(futures):
+            chunk = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                _logger.debug(
+                    f"Failed to download chunk {chunk.index} for {chunk.path}: {e}. "
+                    f"The download of this chunk will be retried later."
+                )
+                failed_downloads[chunk] = future.exception()
+            else:
+                pbar.update()
+
+    return failed_downloads
+
+
+def download_chunk_retries(*, chunks, http_uri, headers, download_path):
+    num_retries = _MLFLOW_MPD_NUM_RETRIES.get()
+    interval = _MLFLOW_MPD_RETRY_INTERVAL_SECONDS.get()
+    for chunk in chunks:
+        _logger.info(f"Retrying download of chunk {chunk.index} for {chunk.path}")
+        for retry in range(num_retries):
+            try:
+                download_chunk(
+                    range_start=chunk.start,
+                    range_end=chunk.end,
+                    headers=headers,
+                    download_path=download_path,
+                    http_uri=http_uri,
+                )
+                _logger.info(f"Successfully downloaded chunk {chunk.index} for {chunk.path}")
+                break
+            except Exception:
+                if retry == num_retries - 1:
+                    raise
+            time.sleep(interval)
+
+
 def _handle_readonly_on_windows(func, path, exc_info):
     """
     This function should not be called directly but should be passed to `onerror` of
@@ -600,7 +847,7 @@ def _handle_readonly_on_windows(func, path, exc_info):
     """
     exc_type, exc_value = exc_info[:2]
     should_reattempt = (
-        os.name == "nt"
+        is_windows()
         and func in (os.unlink, os.rmdir)
         and issubclass(exc_type, PermissionError)
         and exc_value.winerror == 5
@@ -611,21 +858,44 @@ def _handle_readonly_on_windows(func, path, exc_info):
     func(path)
 
 
+def _get_tmp_dir():
+    from mlflow.utils.databricks_utils import get_repl_id, is_in_databricks_runtime
+
+    if is_in_databricks_runtime():
+        try:
+            return get_databricks_local_temp_dir()
+        except Exception:
+            pass
+
+        if repl_id := get_repl_id():
+            return os.path.join("/tmp", "repl_tmp_data", repl_id)
+
+    return None
+
+
+def create_tmp_dir():
+    if directory := _get_tmp_dir():
+        os.makedirs(directory, exist_ok=True)
+        return tempfile.mkdtemp(dir=directory)
+
+    return tempfile.mkdtemp()
+
+
 @cache_return_value_per_process
 def get_or_create_tmp_dir():
     """
     Get or create a temporary directory which will be removed once python process exit.
     """
-    from mlflow.utils.databricks_utils import is_in_databricks_runtime, get_repl_id
+    from mlflow.utils.databricks_utils import get_repl_id, is_in_databricks_runtime
 
     if is_in_databricks_runtime() and get_repl_id() is not None:
         # Note: For python process attached to databricks notebook, atexit does not work.
-        # The directory returned by `dbutils.entry_point.getReplLocalTempDir()`
+        # The directory returned by `get_databricks_local_tmp_dir`
         # will be removed once databricks notebook detaches.
         # The temp directory is designed to be used by all kinds of applications,
         # so create a child directory "mlflow" for storing mlflow temp data.
         try:
-            repl_local_tmp_dir = _get_dbutils().entry_point.getReplLocalTempDir()
+            repl_local_tmp_dir = get_databricks_local_temp_dir()
         except Exception:
             repl_local_tmp_dir = os.path.join("/tmp", "repl_tmp_data", get_repl_id())
 
@@ -646,19 +916,19 @@ def get_or_create_nfs_tmp_dir():
     """
     Get or create a temporary NFS directory which will be removed once python process exit.
     """
-    from mlflow.utils.databricks_utils import is_in_databricks_runtime, get_repl_id
+    from mlflow.utils.databricks_utils import get_repl_id, is_in_databricks_runtime
     from mlflow.utils.nfs_on_spark import get_nfs_cache_root_dir
 
     nfs_root_dir = get_nfs_cache_root_dir()
 
     if is_in_databricks_runtime() and get_repl_id() is not None:
         # Note: In databricks, atexit hook does not work.
-        # The directory returned by `dbutils.entry_point.getReplNFSTempDir()`
+        # The directory returned by `get_databricks_nfs_tmp_dir`
         # will be removed once databricks notebook detaches.
         # The temp directory is designed to be used by all kinds of applications,
         # so create a child directory "mlflow" for storing mlflow temp data.
         try:
-            repl_nfs_tmp_dir = _get_dbutils().entry_point.getReplNFSTempDir()
+            repl_nfs_tmp_dir = get_databricks_nfs_temp_dir()
         except Exception:
             repl_nfs_tmp_dir = os.path.join(nfs_root_dir, "repl_tmp_data", get_repl_id())
 
@@ -675,14 +945,14 @@ def get_or_create_nfs_tmp_dir():
 
 
 def write_spark_dataframe_to_parquet_on_local_disk(spark_df, output_path):
-    """
-    Write spark dataframe in parquet format to local disk.
+    """Write spark dataframe in parquet format to local disk.
 
-    :param spark_df: Spark dataframe
-    :param output_path: path to write the data to
+    Args:
+        spark_df: Spark dataframe.
+        output_path: Path to write the data to.
+
     """
     from mlflow.utils.databricks_utils import is_in_databricks_runtime
-    import uuid
 
     if is_in_databricks_runtime():
         dbfs_path = os.path.join(".mlflow", "cache", str(uuid.uuid4()))
@@ -691,3 +961,130 @@ def write_spark_dataframe_to_parquet_on_local_disk(spark_df, output_path):
         shutil.rmtree("/dbfs/" + dbfs_path)
     else:
         spark_df.coalesce(1).write.format("parquet").save(output_path)
+
+
+def shutil_copytree_without_file_permissions(src_dir, dst_dir):
+    """
+    Copies the directory src_dir into dst_dir, without preserving filesystem permissions
+    """
+    for dirpath, dirnames, filenames in os.walk(src_dir):
+        for dirname in dirnames:
+            relative_dir_path = os.path.relpath(os.path.join(dirpath, dirname), src_dir)
+            # For each directory <dirname> immediately under <dirpath>, create an equivalently-named
+            # directory under the destination directory
+            abs_dir_path = os.path.join(dst_dir, relative_dir_path)
+            os.mkdir(abs_dir_path)
+        for filename in filenames:
+            # For each file with name <filename> immediately under <dirpath>, copy that file to
+            # the appropriate location in the destination directory
+            file_path = os.path.join(dirpath, filename)
+            relative_file_path = os.path.relpath(file_path, src_dir)
+            abs_file_path = os.path.join(dst_dir, relative_file_path)
+            shutil.copy2(file_path, abs_file_path)
+
+
+def contains_path_separator(path):
+    """
+    Returns True if a path contains a path separator, False otherwise.
+    """
+    return any((sep in path) for sep in (os.path.sep, os.path.altsep) if sep is not None)
+
+
+def contains_percent(path):
+    """
+    Returns True if a path contains a percent character, False otherwise.
+    """
+    return "%" in path
+
+
+def read_chunk(path: os.PathLike, size: int, start_byte: int = 0) -> bytes:
+    """Read a chunk of bytes from a file.
+
+    Args:
+        path: Path to the file.
+        size: The size of the chunk.
+        start_byte: The start byte of the chunk.
+
+    Returns:
+        The chunk of bytes.
+
+    """
+    with open(path, "rb") as f:
+        if start_byte > 0:
+            f.seek(start_byte)
+        return f.read(size)
+
+
+@contextmanager
+def remove_on_error(path: os.PathLike, onerror=None):
+    """A context manager that removes a file or directory if an exception is raised during
+    execution.
+
+    Args:
+        path: Path to the file or directory.
+        onerror: A callback function that will be called with the captured exception before
+            the file or directory is removed. For example, you can use this callback to
+            log the exception.
+
+    """
+    try:
+        yield
+    except Exception as e:
+        if onerror:
+            onerror(e)
+        if os.path.exists(path):
+            if os.path.isfile(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+        _logger.warning(
+            f"Failed to remove {path}" if os.path.exists(path) else f"Successfully removed {path}"
+        )
+        raise
+
+
+@contextmanager
+def chdir(path: str) -> None:
+    """Temporarily change the current working directory to the specified path.
+
+    Args:
+        path: The path to use as the temporary working directory.
+    """
+    cwd = os.getcwd()
+    try:
+        os.chdir(path)
+        yield
+    finally:
+        os.chdir(cwd)
+
+
+def get_total_file_size(path: Union[str, pathlib.Path]) -> Optional[int]:
+    """Return the size of all files under given path, including files in subdirectories.
+
+    Args:
+        path: The absolute path of a local directory.
+
+    Returns:
+        size in bytes.
+
+    """
+    try:
+        if isinstance(path, pathlib.Path):
+            path = str(path)
+        if not os.path.exists(path):
+            raise MlflowException(
+                message=f"The given {path} does not exist.", error_code=INVALID_PARAMETER_VALUE
+            )
+        if not os.path.isdir(path):
+            raise MlflowException(
+                message=f"The given {path} is not a directory.", error_code=INVALID_PARAMETER_VALUE
+            )
+
+        total_size = 0
+        for cur_path, dirs, files in os.walk(path):
+            full_paths = [os.path.join(cur_path, file) for file in files]
+            total_size += sum([os.path.getsize(file) for file in full_paths])
+        return total_size
+    except Exception as e:
+        _logger.info(f"Failed to get the total size of {path} because of error :{e}")
+        return None

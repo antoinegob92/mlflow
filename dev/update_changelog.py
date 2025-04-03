@@ -1,13 +1,14 @@
-import re
 import os
+import re
 import subprocess
-from datetime import datetime
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple, List, Any
+from typing import Any, NamedTuple
 
 import click
 import requests
+from packaging.version import Version
 
 
 def get_header_for_version(version):
@@ -31,7 +32,7 @@ class PullRequest(NamedTuple):
     title: str
     number: int
     author: str
-    labels: List[str]
+    labels: list[str]
 
     @property
     def url(self):
@@ -58,7 +59,7 @@ class PullRequest(NamedTuple):
 
 class Section(NamedTuple):
     title: str
-    items: List[Any]
+    items: list[Any]
 
     def __str__(self):
         if not self.items:
@@ -86,21 +87,12 @@ def is_shallow():
 
 
 @click.command(help="Update CHANGELOG.md")
-@click.option(
-    "--prev-branch",
-    required=True,
-    help="Previous release branch to compare to, e.g. branch-0.8",
-)
-@click.option(
-    "--curr-branch",
-    default="master",
-    help="Current release (candidate) branch to compare to, e.g. branch-0.9 (default: 'master').",
-)
+@click.option("--prev-version", required=True, help="Previous version")
 @click.option("--release-version", required=True, help="MLflow version to release.")
 @click.option(
     "--remote", required=False, default="origin", help="Git remote to use (default: origin). "
 )
-def main(prev_branch, curr_branch, release_version, remote):
+def main(prev_version, release_version, remote):
     if is_shallow():
         print("Unshallowing repository to ensure `git log` works correctly")
         subprocess.check_call(["git", "fetch", "--unshallow"])
@@ -108,9 +100,11 @@ def main(prev_branch, curr_branch, release_version, remote):
         subprocess.check_call(
             ["git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]
         )
-    subprocess.check_call(["git", "fetch", remote, prev_branch])
-    subprocess.check_call(["git", "fetch", remote, curr_branch])
-    subprocess.check_call(["git", "branch", "-r"])
+    release_tag = f"v{prev_version}"
+    ver = Version(release_version)
+    branch = f"branch-{ver.major}.{ver.minor}"
+    subprocess.check_call(["git", "fetch", remote, "tag", release_tag])
+    subprocess.check_call(["git", "fetch", remote, branch])
     git_log_output = subprocess.check_output(
         [
             "git",
@@ -119,7 +113,7 @@ def main(prev_branch, curr_branch, release_version, remote):
             "--graph",
             "--cherry-pick",
             "--pretty=format:%s",
-            f"{remote}/{prev_branch}...{remote}/{curr_branch}",
+            f"tags/{release_tag}...{remote}/{branch}",
         ],
         text=True,
     )
@@ -174,7 +168,7 @@ def main(prev_branch, curr_branch, release_version, remote):
     }
     assert len(unknown_labels) == 0, f"Unknown labels: {unknown_labels}"
 
-    breaking_changes = Section("Breaking changes:", label_to_prs.get("rn/breaking_change", []))
+    breaking_changes = Section("Breaking changes:", label_to_prs.get("rn/breaking-change", []))
     features = Section("Features:", label_to_prs.get("rn/feature", []))
     bug_fixes = Section("Bug fixes:", label_to_prs.get("rn/bug-fix", []))
     doc_updates = Section("Documentation updates:", label_to_prs.get("rn/documentation", []))
@@ -213,4 +207,4 @@ def main(prev_branch, curr_branch, release_version, remote):
 
 
 if __name__ == "__main__":
-    main()  # pylint: disable=no-value-for-parameter
+    main()

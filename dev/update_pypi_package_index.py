@@ -10,10 +10,11 @@ $ python dev/update_pypi_package_index.py
 import argparse
 import json
 import posixpath
-import requests
 import sys
 from datetime import datetime
 from html.parser import HTMLParser
+
+import requests
 
 
 def parse_args(args):
@@ -32,7 +33,7 @@ def main(args):
     args = parse_args(args)
     package_names = set()
 
-    class PyPIHTMLParser(HTMLParser):  # pylint: disable=abstract-method
+    class PyPIHTMLParser(HTMLParser):
         def handle_starttag(self, tag, attrs):
             if tag == "a":
                 for name, value in attrs:

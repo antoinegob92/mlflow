@@ -1,6 +1,6 @@
+import os
 from unittest import mock
 
-import os
 import pytest
 
 import mlflow
@@ -9,11 +9,10 @@ from mlflow.utils.file_utils import read_yaml, write_yaml
 from mlflow.utils.virtualenv import _create_virtualenv
 
 from tests.projects.utils import (
-    TEST_VIRTUALENV_PROJECT_DIR,
     TEST_VIRTUALENV_CONDA_PROJECT_DIR,
     TEST_VIRTUALENV_NO_PYTHON_ENV,
+    TEST_VIRTUALENV_PROJECT_DIR,
 )
-
 
 spy_on_create_virtualenv = mock.patch(
     "mlflow.projects.backend.local._create_virtualenv", wraps=_create_virtualenv
@@ -33,17 +32,18 @@ def use_dev_mlflow_for_projects():
         conda_pip_dependencies.append(mlflow_root)
     write_yaml(TEST_VIRTUALENV_CONDA_PROJECT_DIR, "conda.yaml", conda_env, overwrite=True)
 
-    virtualenv_requirements_path = os.path.join(TEST_VIRTUALENV_PROJECT_DIR, "requirements.txt")
-    with open(virtualenv_requirements_path) as f:
-        virtualenv_requirements = f.readlines()
+    for proj_dir in (TEST_VIRTUALENV_PROJECT_DIR, TEST_VIRTUALENV_NO_PYTHON_ENV):
+        virtualenv_requirements_path = os.path.join(proj_dir, "requirements.txt")
+        with open(virtualenv_requirements_path) as f:
+            virtualenv_requirements = f.readlines()
 
-    with open(virtualenv_requirements_path, "w") as f:
-        for line in virtualenv_requirements:
-            if line.rstrip("\n") != "mlflow":
-                f.write(line)
-            else:
-                f.write(mlflow_root)
-                f.write("\n")
+        with open(virtualenv_requirements_path, "w") as f:
+            for line in virtualenv_requirements:
+                if line.rstrip("\n") != "mlflow":
+                    f.write(line)
+                else:
+                    f.write(mlflow_root)
+                    f.write("\n")
 
 
 @spy_on_create_virtualenv

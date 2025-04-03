@@ -1,31 +1,33 @@
-import git
 import os
 import tempfile
-
-import pytest
+import zipfile
 from unittest import mock
+
+import git
+import pytest
 
 import mlflow
 from mlflow.exceptions import ExecutionException
 from mlflow.projects import _project_spec
 from mlflow.projects.utils import (
+    _fetch_git_repo,
+    _fetch_project,
     _get_storage_dir,
     _is_valid_branch_name,
     _is_zip_uri,
-    _fetch_project,
-    _fetch_git_repo,
     _parse_subdirectory,
-    get_or_create_run,
     fetch_and_validate_project,
+    get_or_create_run,
     load_project,
 )
 from mlflow.utils.mlflow_tags import MLFLOW_PROJECT_ENTRY_POINT, MLFLOW_SOURCE_NAME
+
 from tests.projects.utils import (
-    assert_dirs_equal,
+    GIT_PROJECT_BRANCH,
     GIT_PROJECT_URI,
     TEST_PROJECT_DIR,
     TEST_PROJECT_NAME,
-    GIT_PROJECT_BRANCH,
+    assert_dirs_equal,
 )
 
 
@@ -36,16 +38,14 @@ def _build_uri(base_uri, subdirectory):
 
 
 @pytest.fixture
-def zipped_repo(tmpdir):
-    import zipfile
-
-    zip_name = tmpdir.join("%s.zip" % TEST_PROJECT_NAME).strpath
+def zipped_repo(tmp_path):
+    zip_name = tmp_path.joinpath(f"{TEST_PROJECT_NAME}.zip")
     with zipfile.ZipFile(zip_name, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for root, _, files in os.walk(TEST_PROJECT_DIR):
             for file_name in files:
                 file_path = os.path.join(root, file_name)
                 zip_file.write(file_path, file_path[len(TEST_PROJECT_DIR) + len(os.sep) :])
-    return zip_name
+    return str(zip_name)
 
 
 def test_is_zip_uri():
@@ -64,7 +64,8 @@ def test_is_zip_uri():
 
 
 def test__fetch_project(local_git_repo, local_git_repo_uri, zipped_repo, httpserver):
-    httpserver.serve_content(open(zipped_repo, "rb").read())
+    with open(zipped_repo, "rb") as f:
+        httpserver.serve_content(f.read())
     # The tests are as follows:
     # 1. Fetching a locally saved project.
     # 2. Fetching a project located in a Git repo root directory.
@@ -78,9 +79,9 @@ def test__fetch_project(local_git_repo, local_git_repo_uri, zipped_repo, httpser
         (local_git_repo_uri, "", local_git_repo),
         (local_git_repo_uri, "example_project", os.path.join(local_git_repo, "example_project")),
         (os.path.dirname(TEST_PROJECT_DIR), os.path.basename(TEST_PROJECT_DIR), TEST_PROJECT_DIR),
-        (httpserver.url + "/%s.zip" % TEST_PROJECT_NAME, "", TEST_PROJECT_DIR),
+        (httpserver.url + f"/{TEST_PROJECT_NAME}.zip", "", TEST_PROJECT_DIR),
         (zipped_repo, "", TEST_PROJECT_DIR),
-        ("file://%s" % zipped_repo, "", TEST_PROJECT_DIR),
+        (f"file://{zipped_repo}", "", TEST_PROJECT_DIR),
     ]
     for base_uri, subdirectory, expected in test_list:
         work_dir = _fetch_project(uri=_build_uri(base_uri, subdirectory))
@@ -131,13 +132,16 @@ def test_fetch_project_validations(local_git_repo_uri):
         _fetch_project(uri=TEST_PROJECT_DIR, version="version")
 
 
-def test_dont_remove_mlruns(tmpdir):
+def test_dont_remove_mlruns(tmp_path):
     # Fetching a directory containing an "mlruns" folder doesn't remove the "mlruns" folder
-    src_dir = tmpdir.mkdir("mlruns-src-dir")
-    src_dir.mkdir("mlruns").join("some-file.txt").write("hi")
-    src_dir.join("MLproject").write("dummy MLproject contents")
-    dst_dir = _fetch_project(uri=src_dir.strpath, version=None)
-    assert_dirs_equal(expected=src_dir.strpath, actual=dst_dir)
+    src_dir = tmp_path.joinpath("mlruns-src-dir")
+    src_dir.mkdir()
+    mlruns = src_dir.joinpath("mlruns")
+    mlruns.mkdir()
+    mlruns.joinpath("some-file.txt").write_text("hi")
+    src_dir.joinpath("MLproject").write_text("dummy MLproject contents")
+    dst_dir = _fetch_project(uri=str(src_dir), version=None)
+    assert_dirs_equal(expected=str(src_dir), actual=dst_dir)
 
 
 def test_parse_subdirectory():
@@ -159,12 +163,12 @@ def test_parse_subdirectory():
         _parse_subdirectory(period_fail_uri)
 
 
-def test_storage_dir(tmpdir):
+def test_storage_dir(tmp_path):
     """
     Test that we correctly handle the `storage_dir` argument, which specifies where to download
     distributed artifacts passed to arguments of type `path`.
     """
-    assert os.path.dirname(_get_storage_dir(tmpdir.strpath)) == tmpdir.strpath
+    assert os.path.dirname(_get_storage_dir(tmp_path)) == str(tmp_path)
     assert os.path.dirname(_get_storage_dir(None)) == tempfile.gettempdir()
 
 
@@ -173,7 +177,7 @@ def test_is_valid_branch_name(local_git_repo):
     assert not _is_valid_branch_name(local_git_repo, "dev")
 
 
-def test_fetch_create_and_log(tmpdir):
+def test_fetch_create_and_log(tmp_path):
     entry_point_name = "entry_point"
     parameters = {
         "method_name": "string",
@@ -187,7 +191,7 @@ def test_fetch_create_and_log(tmpdir):
         name="my_project",
     )
     experiment_id = mlflow.create_experiment("test_fetch_project")
-    expected_dir = tmpdir
+    expected_dir = str(tmp_path)
     project_uri = "http://someuri/myproject.git"
     user_param = {"method_name": "newton"}
     with mock.patch("mlflow.projects.utils._fetch_project", return_value=expected_dir):

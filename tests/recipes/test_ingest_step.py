@@ -1,5 +1,6 @@
 import os
 import pathlib
+import tempfile
 import time
 from datetime import datetime
 from unittest import mock
@@ -11,16 +12,9 @@ from pyspark.sql import SparkSession
 
 from mlflow.exceptions import MlflowException
 from mlflow.recipes.steps.ingest import IngestStep
+from mlflow.recipes.utils import _RECIPE_CONFIG_FILE_NAME
 from mlflow.store.artifact.s3_artifact_repo import S3ArtifactRepository
 from mlflow.utils.file_utils import read_yaml
-from mlflow.recipes.utils import _RECIPE_CONFIG_FILE_NAME
-
-# pylint: disable=unused-import
-from tests.recipes.helper_functions import (
-    tmp_recipe_root_path,
-    enter_recipe_example_directory,
-    enter_test_recipe_directory,
-)
 
 
 @pytest.fixture
@@ -36,22 +30,23 @@ def pandas_df():
     return df
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(scope="module")
 def spark_session():
-    session = (
-        SparkSession.builder.master("local[*]")
-        .config("spark.jars.packages", "io.delta:delta-core_2.12:1.2.1")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config(
-            "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
-        )
-        .getOrCreate()
-    )
-    yield session
-    session.stop()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with (
+            SparkSession.builder.master("local[*]")
+            .config("spark.jars.packages", "io.delta:delta-spark_2.12:3.0.0")
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+            .config(
+                "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+            )
+            .config("spark.sql.warehouse.dir", str(tmpdir))
+            .getOrCreate()
+        ) as session:
+            yield session
 
 
-@pytest.fixture()
+@pytest.fixture
 def spark_df(spark_session):
     return spark_session.createDataFrame(
         [
@@ -99,7 +94,7 @@ def test_ingests_parquet_successfully(use_relative_path, multiple_files, pandas_
     pd.testing.assert_frame_equal(reloaded_df, pandas_df)
 
 
-def custom_load_csv(file_path, file_format):  # pylint: disable=unused-argument
+def custom_load_csv(file_path, file_format):
     return pd.read_csv(file_path, index_col=0)
 
 
@@ -110,7 +105,7 @@ def test_ingests_custom_format(pandas_df, tmp_recipe_root_path, tmp_path):
     pandas_df_part2 = pandas_df[1:]
     pandas_df_part1.to_csv(dataset_path / "df1.csv")
     pandas_df_part2.to_csv(dataset_path / "df2.csv")
-    dataset_path = [f'{dataset_path / "df1.csv"}', f'{dataset_path / "df2.csv"}']
+    dataset_path = [f"{dataset_path / 'df1.csv'}", f"{dataset_path / 'df2.csv'}"]
 
     recipe_yaml = tmp_recipe_root_path.joinpath(_RECIPE_CONFIG_FILE_NAME)
     recipe_yaml.write_text(
@@ -165,7 +160,7 @@ def test_ingests_csv_successfully(
         dataset_path = pathlib.Path(os.path.relpath(dataset_path))
 
     if explicit_file_list and multiple_files:
-        dataset_path = [f'{dataset_path / "df1.csv"}', f'{dataset_path / "df2.csv"}']
+        dataset_path = [f"{dataset_path / 'df1.csv'}", f"{dataset_path / 'df2.csv'}"]
     else:
         dataset_path = str(dataset_path)
 
@@ -187,7 +182,7 @@ def test_ingests_csv_successfully(
     pd.testing.assert_frame_equal(reloaded_df, pandas_df)
 
 
-def custom_load_wine_csv(file_path, file_format):  # pylint: disable=unused-argument
+def custom_load_wine_csv(file_path, file_format):
     return pd.read_csv(file_path, sep=";")
 
 
@@ -205,8 +200,8 @@ def test_ingests_remote_http_datasets_with_multiple_files_successfully(tmp_path)
                         "skip_data_profiling": True,
                         "using": "csv",
                         "location": [
-                            "https://raw.githubusercontent.com/mlflow/mlflow/master/tests/data/winequality-red.csv",
-                            "https://raw.githubusercontent.com/mlflow/mlflow/master/tests/data/winequality-white.csv",
+                            "https://raw.githubusercontent.com/mlflow/mlflow/master/tests/datasets/winequality-red.csv",
+                            "https://raw.githubusercontent.com/mlflow/mlflow/master/tests/datasets/winequality-white.csv",
                         ],
                         "loader_method": "load_file_as_dataframe",
                     }
@@ -218,7 +213,7 @@ def test_ingests_remote_http_datasets_with_multiple_files_successfully(tmp_path)
         assert reloaded_df.count()[0] == 6497
 
 
-def custom_load_file_as_dataframe(file_path, file_format):  # pylint: disable=unused-argument
+def custom_load_file_as_dataframe(file_path, file_format):
     return pd.read_csv(file_path, sep="#", index_col=0)
 
 
@@ -664,11 +659,15 @@ def test_ingest_throws_when_spark_unavailable_for_spark_based_dataset(spark_df, 
     dataset_path = tmp_path / "test.delta"
     spark_df.write.format("delta").save(str(dataset_path))
 
-    with mock.patch(
-        "mlflow.recipes.steps.ingest.datasets._get_active_spark_session",
-        side_effect=Exception("Spark unavailable"),
-    ), pytest.raises(
-        MlflowException, match="Encountered an error while searching for an active Spark session"
+    with (
+        mock.patch(
+            "mlflow.recipes.steps.ingest.datasets._get_active_spark_session",
+            side_effect=Exception("Spark unavailable"),
+        ),
+        pytest.raises(
+            MlflowException,
+            match="Encountered an error while searching for an active Spark session",
+        ),
     ):
         IngestStep.from_recipe_config(
             recipe_config={
@@ -689,11 +688,7 @@ def test_ingest_makes_spark_session_if_not_available_for_spark_based_dataset(spa
     dataset_path = tmp_path / "test.delta"
     spark_df.write.format("delta").save(str(dataset_path))
 
-    with mock.patch(
-        "mlflow.utils._spark_utils._get_active_spark_session",
-    ) as _get_active_spark_session:
-        _get_active_spark_session.return_value = None
-
+    with mock.patch("mlflow.utils._spark_utils._get_active_spark_session", return_value=None):
         IngestStep.from_recipe_config(
             recipe_config={
                 "target_col": "label",
@@ -864,3 +859,57 @@ def test_ingest_skips_profiling_when_specified(pandas_df, tmp_path):
         step_card_html_content = f.read()
     assert "facets-overview" not in step_card_html_content
     mock_profiling.assert_not_called()
+
+
+@pytest.mark.skip(reason="https://issues.apache.org/jira/projects/SPARK/issues/SPARK-43194")
+@pytest.mark.usefixtures("enter_test_recipe_directory")
+def test_ingests_spark_sql_datetime_successfully(spark_session, tmp_path):
+    from pyspark.sql.functions import (
+        col,
+        current_date,
+        current_timestamp,
+        rand,
+        to_timestamp,
+        unix_timestamp,
+    )
+
+    spark = spark_session.builder.getOrCreate()
+    spark_df = (
+        spark.range(10)
+        .withColumn("f1", rand(seed=123))
+        .withColumn("date_today", current_date())
+        .withColumn("time_now", current_timestamp())
+        .withColumn(
+            "timestamp", to_timestamp(unix_timestamp("time_now") - col("f1") * 60 * 60 * 24)
+        )
+        .drop("time_now")
+    )
+    # data = [("2019-01-23", 1), ("2019-06-24", 2), ("2019-09-20", 3)]
+    # spark_df = spark_session.createDataFrame(data).toDF("date", "increment")
+    spark_df.write.mode("overwrite").saveAsTable("test_table")
+
+    IngestStep.from_recipe_config(
+        recipe_config={
+            "target_col": "f1",
+            "steps": {
+                "ingest": {
+                    "using": "spark_sql",
+                    "sql": "SELECT * FROM test_table ORDER BY id",
+                }
+            },
+        },
+        recipe_root=os.getcwd(),
+    ).run(output_directory=tmp_path)
+
+    # Spark DataFrames are not ingested with a consistent row order, as doing so would incur a
+    # substantial performance cost. Accordingly, we sort the ingested DataFrame and the original
+    # DataFrame on the `id` column and reset the DataFrame index to achieve a consistent ordering
+    # before testing their equivalence
+    reloaded_df = (
+        pd.read_parquet(str(tmp_path / "dataset.parquet"))
+        .sort_values(by="id")
+        .reset_index(drop=True)
+    )
+
+    assert reloaded_df["date_today"].dtype == "datetime64[ns]"
+    assert reloaded_df["timestamp"].dtype == "datetime64[ns]"

@@ -5,11 +5,13 @@ We welcome community contributions to MLflow. This page provides useful informat
 **Table of Contents**
 
 - [Governance](#governance)
+- [Core Members](#core-members)
 - [Contribution process](#contribution-process)
 - [Contribution guidelines](#contribution-guidelines)
   - [Write designs for significant changes](#write-designs-for-significant-changes)
   - [Make changes backwards compatible](#make-changes-backwards-compatible)
   - [Consider introducing new features as MLflow Plugins](#consider-introducing-new-features-as-mlflow-plugins)
+  - [Python Style Guide](#python-style-guide)
 - [Setting up the repository](#setting-up-the-repository)
 - [Developing and testing MLflow](#developing-and-testing-mlflow)
   - [Environment Setup and Python configuration](#environment-setup-and-python-configuration)
@@ -52,6 +54,20 @@ Governance of MLflow is conducted by the Technical Steering Committee
 
 The founding technical charter can be found
 [here](https://github.com/mlflow/mlflow/blob/master/mlflow-charter.pdf).
+
+## Core Members
+
+MLflow is currently maintained by the following core members with significant contributions from hundreds of exceptionally talented community members.
+
+- [Harutaka Kawamura](https://github.com/harupy)
+- [Weichen Xu](https://github.com/WeichenXu123)
+- [Corey Zumar](https://github.com/dbczumar)
+- [Ben Wilson](https://github.com/BenWilson2)
+- [Serena Ruan](https://github.com/serena-ruan)
+- [Yuki Watanabe](https://github.com/B-Step62)
+- [Daniel Lok](https://github.com/daniellok-db)
+- [Tomu Hirata](https://github.com/TomeHirata)
+- [Gabriel Fu](https://github.com/gabrielfu)
 
 ## Contribution process
 
@@ -168,6 +184,30 @@ base](https://github.com/mlflow/mlflow/blob/cdc6a651d5af0f29bd448d2c87a198cf5d32
 For more information about Plugins, see
 <https://mlflow.org/docs/latest/plugins.html>.
 
+### Python Style Guide
+
+##### Docstrings
+
+We follow [Google's Python Style Guide](https://google.github.io/styleguide/pyguide.html)
+for writing docstrings. Make sure your docstrings adhere to this style
+guide.
+
+###### Code Style
+
+We use [prettier](https://prettier.io/),
+[blacken-docs](https://pypi.org/project/blacken-docs/), [ruff](https://github.com/astral-sh/ruff), and
+a number of custom lint checking scripts in our CI via
+pre-commit Git hooks. If your code passes the CI checks, it's
+formatted correctly.
+
+To validate that your local versions of the above libraries
+match those in the mlflow CI, refer to [lint-requirements.txt](https://github.com/mlflow/mlflow/blob/master/requirements/lint-requirements.txt).
+You can compare these versions with your local using pip:
+
+```bash
+pip show ruff
+```
+
 ## Setting up the repository
 
 To set up the MLflow repository, run the following commands:
@@ -180,7 +220,7 @@ git clone --recurse-submodules git@github.com:<username>/mlflow.git
 
 # Add the upstream repository
 cd mlflow
-git remote add upstream git@github.com/mlflow/mlflow.git
+git remote add upstream git@github.com:mlflow/mlflow.git
 ```
 
 If you cloned the repository before without `--recurse-submodules`, run
@@ -298,7 +338,7 @@ git config --global user.email yourname@example.com
 ```
 
 For convenience, we provide a pre-commit git hook that validates that
-commits are signed-off and runs `black --check` and `pylint` to ensure the
+commits are signed-off and runs `ruff check --fix` and `ruff format` to ensure the
 code will pass the lint check for python. You can enable it by running:
 
 ```bash
@@ -398,6 +438,12 @@ The Javascript Dev Server will run at <http://localhost:3000> and the
 MLflow server will run at <http://localhost:5000> and show runs logged
 in `./mlruns`.
 
+#### Launching MLflow UI with MLflow AI Gateway for PromptLab
+
+```sh
+python dev/server.py
+```
+
 #### Testing a React Component
 
 Add a test file in the same directory as the newly created React
@@ -428,13 +474,6 @@ yarn lint:fix
 If contributing to MLflow's R APIs, install
 [R](https://cloud.r-project.org/) and make sure that you have satisfied
 all the [Environment Setup and Python configuration](#environment-setup-and-python-configuration).
-
-For changes to R documentation, also install
-[pandoc](https://pandoc.org/installing.html) 2.2.1 or above, verifying
-the version of your installation via `pandoc --version`. If using Mac
-OSX, note that the homebrew installation of pandoc may be out of date -
-you can find newer pandoc versions at
-<https://github.com/jgm/pandoc/releases>.
 
 The `mlflow/R/mlflow` directory contains R wrappers for the Projects,
 Tracking and Models components. These wrappers depend on the Python
@@ -551,25 +590,27 @@ disable this behavior, decorate your test function with
 Verify that the unit tests & linter pass before submitting a pull
 request by running:
 
-We use [Black](https://black.readthedocs.io/en/stable/) to ensure a
+We use [ruff](https://docs.astral.sh/ruff/) to ensure a
 consistent code format. You can auto-format your code by running:
 
 ```bash
-black .
+ruff format .
+ruff check .
 ```
 
 Then, verify that the unit tests & linter pass before submitting a pull
 request by running:
 
 ```bash
-./dev/lint.sh
-./dev/run-python-tests.sh
+pre-commit run --all-files
+pytest tests --quiet --requires-ssh --ignore-flavors --serve-wheel \
+  --ignore=tests/examples --ignore=tests/recipes --ignore=tests/evaluate
 ```
 
 We use [pytest](https://docs.pytest.org/en/latest/contents.html) to run
 Python tests. You can run tests for one or more test directories or
 files via `pytest [file_or_dir] ... [file_or_dir]`. For example, to run
-all pyfunc tests, you can run:
+all pytest tests, you can run:
 
 ```bash
 pytest tests/pyfunc
@@ -594,7 +635,7 @@ If you are adding new framework flavor support, you'll need to modify
 `pytest` and Github action configurations so tests for your code can run
 properly. Generally, the files you'll have to edit are:
 
-1.  `dev/run-python-tests.sh`:
+1.  `.github/workflows/master.yml`: lines where pytest runs with `--ignore-flavors` flag
 
     1. Add your tests to the ignore list, where the other frameworks are
        ignored
@@ -614,11 +655,11 @@ below.
 
 ##### Building Protobuf Files
 
-To build protobuf files, simply run `generate-protos.sh`. The required
-`protoc` version is `3.6.0`. You can find the URL of a
+To build protobuf files, simply run `python ./dev/generate_protos.py`. The required
+`protoc` version is `3.19.4`. You can find the URL of a
 system-appropriate installation of `protoc` at
-<https://github.com/protocolbuffers/protobuf/releases/tag/v3.6.0>, e.g.
-<https://github.com/protocolbuffers/protobuf/releases/download/v3.6.0/protoc-3.6.0-osx-x86_64.zip>
+<https://github.com/protocolbuffers/protobuf/releases/tag/v3.19.4>, e.g.
+<https://github.com/protocolbuffers/protobuf/releases/download/v3.19.4/protoc-3.19.4-osx-x86_64.zip>
 if you're on 64-bit Mac OSX.
 
 Then, run the following to install `protoc`:
@@ -767,7 +808,8 @@ Finally, before filing a pull request, verify all Python tests pass.
 
 ### Building a Distributable Artifact
 
-[Install Node Modules](#install-node-modules), then run the following:
+If you would like to build a fully functional version of MLflow from your local branch for testing or a local patch fix, first
+[install the Node Modules](#install-node-modules), then run the following:
 
 Generate JS files in `mlflow/server/js/build`:
 
@@ -776,72 +818,50 @@ cd mlflow/server/js
 yarn build
 ```
 
-Build a pip-installable wheel in `dist/`:
+Build a pip-installable wheel and a compressed code archive in `dist/`:
 
 ```bash
 cd -
-python setup.py bdist_wheel
+python -m build
 ```
+
+### TOML formatting
+
+We use [taplo](https://taplo.tamasfe.dev/) to enforce consistent TOML formatting. You can install it by following the instructions [here](https://taplo.tamasfe.dev/cli/introduction.html).
+
+### Excluding Symlinks from IDE Searches
+
+The `mlflow/skinny` symlink points to `../mlflow` and may cause duplicate entries in search results. To exclude it from searches, follow these steps:
+
+**VSCode:**
+
+1. Open `Settings`.
+2. Search for `search.followSymlinks` and set it to `false`.
+
+**PyCharm:**
+
+1. Right-click `skinny/mlflow`.
+2. Select `Mark Directory as` -> `Excluded`.
 
 ### Writing Docs
 
-First, install dependencies for building docs as described in [Environment Setup and Python configuration](#environment-setup-and-python-configuration).
+There are two separate build systems for the MLflow documentation:
 
-To generate a live preview of Python & other rst documentation, run the
-following snippet. Note that R & Java API docs must be regenerated
-separately after each change and are not live-updated; see subsequent
-sections for instructions on generating R and Java docs.
+#### API Docs
 
-```bash
-cd docs
-make livehtml
-```
+The [API reference](https://mlflow.org/docs/latest/api_reference/) is managed by [Sphinx](https://www.sphinx-doc.org/en/master/). The content is primarily populated by our Python docstrings, which are written in reStructuredText (RST).
 
-Generate R API rst doc files via:
+For instructions on how to build the API docs, please check the [README.md](https://github.com/mlflow/mlflow/blob/master/docs/api_reference/README.md) in the `docs/api_reference/` subfolder.
 
-```bash
-cd docs
-make rdocs
-```
+#### Main Docs
 
----
+The main MLflow docs (e.g. feature docs, tutorials, etc) are written using [Docusaurus](https://docusaurus.io/). The only prerequisite for building these docs is NodeJS >= 18.0. Please check out the [official NodeJS docs](https://nodejs.org/en/download) for platform-specific installation instructions.
 
-**NOTE**
+To get started, simply run `yarn && yarn start` from the [`docs/`](https://github.com/mlflow/mlflow/blob/master/docs/) folder. This will spin up a development server that can be viewed at `http://localhost:3000/` (by default). The source files (primarily `.MDX`) are located in the [`docs/docs/`](https://github.com/mlflow/mlflow/blob/master/docs/docs/) subfolder. Changes to these files should be automatically reflected in the development server!
 
-If you attempt to build the R documentation on an ARM-based platform (Apple silicon M1, M2, etc.)
-you will likely get an error when trying to execute the Docker build process for the make command.
-To address this, set the default docker platform environment variable as follows:
+There are also some `.ipynb` files which serve as the source for some of our tutorials. These are converted to MDX via a custom script (`yarn convert-notebooks`). If you want to make changes to these, you will need to install the `nbconvert` Python package in order to preview your changes.
 
-```bash
-export DOCKER_DEFAULT_PLATFORM=linux/amd64
-```
-
----
-
-Generate Java API rst doc files via:
-
-```bash
-cd docs
-make javadocs
-```
-
-Generate API docs for all languages via:
-
-```bash
-cd docs
-make html
-```
-
-If changing existing Python APIs or adding new APIs under existing
-modules, ensure that references to the modified APIs are updated in
-existing docs under `docs/source`. Note that the Python doc generation
-process will automatically produce updated API docs, but you should
-still audit for usages of the modified APIs in guides and examples.
-
-If adding a new public Python module, create a corresponding doc file
-for the module under `docs/source/python_api` - [see
-here](https://github.com/mlflow/mlflow/blob/v0.9.1/docs/source/python_api/mlflow.tracking.rst#mlflowtracking)
-for an example.
+For more detailed information, please check the [README.md](https://github.com/mlflow/mlflow/blob/master/docs/README.md) in the `docs/` folder. We're looking forward to your contributions!
 
 ### Sign your work
 
@@ -894,6 +914,8 @@ Then add a line to every git commit message:
 Use your real name (sorry, no pseudonyms or anonymous contributions).
 You can sign your commit automatically with `git commit -s` after you
 set your `user.name` and `user.email` git configs.
+
+> NOTE: Failing to sign your commits will result in an inability to merge your PR!
 
 ## Code of Conduct
 

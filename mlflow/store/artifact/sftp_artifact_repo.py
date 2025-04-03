@@ -1,13 +1,12 @@
 import os
-import sys
-import threading
-
 import posixpath
+import sys
 import urllib.parse
+from contextlib import contextmanager
+from queue import Queue
 
 from mlflow.entities import FileInfo
 from mlflow.store.artifact.artifact_repo import ArtifactRepository
-from contextlib import contextmanager
 
 
 # Based on: https://stackoverflow.com/a/58466685
@@ -24,16 +23,17 @@ def _put_r_for_windows(sftp, local_dir, remote_dir, preserve_mtime=False):
 
 class _SftpPool:
     def __init__(self, connections):
-        self._connections = connections
-        self._cond = threading.Condition()
+        self._idle_connection_queue = Queue()
+        for c in connections:
+            self._idle_connection_queue.put(c)
 
     @contextmanager
-    def get_sfp_connection(self):
-        with self._cond:
-            self._cond.wait_for(lambda: bool(self._connections))
-            connection = self._connections.pop(-1)
-        yield connection
-        self._connections.append(connection)
+    def get_sftp_connection(self):
+        c = self._idle_connection_queue.get(block=True)
+        try:
+            yield c
+        finally:
+            self._idle_connection_queue.put(c)
 
 
 class SFTPArtifactRepository(ArtifactRepository):
@@ -48,10 +48,10 @@ class SFTPArtifactRepository(ArtifactRepository):
             "username": parsed.username,
             "password": parsed.password,
         }
-        self.path = parsed.path
+        self.path = parsed.path or "/"
 
-        import pysftp
         import paramiko
+        import pysftp
 
         if self.config["host"] is None:
             self.config["host"] = "localhost"
@@ -86,13 +86,13 @@ class SFTPArtifactRepository(ArtifactRepository):
 
     def log_artifact(self, local_file, artifact_path=None):
         artifact_dir = posixpath.join(self.path, artifact_path) if artifact_path else self.path
-        with self.pool.get_sfp_connection() as sftp:
+        with self.pool.get_sftp_connection() as sftp:
             sftp.makedirs(artifact_dir)
             sftp.put(local_file, posixpath.join(artifact_dir, os.path.basename(local_file)))
 
     def log_artifacts(self, local_dir, artifact_path=None):
         artifact_dir = posixpath.join(self.path, artifact_path) if artifact_path else self.path
-        with self.pool.get_sfp_connection() as sftp:
+        with self.pool.get_sftp_connection() as sftp:
             sftp.makedirs(artifact_dir)
             if sys.platform == "win32":
                 _put_r_for_windows(sftp, local_dir, artifact_dir)
@@ -102,13 +102,13 @@ class SFTPArtifactRepository(ArtifactRepository):
     def _is_directory(self, artifact_path):
         artifact_dir = self.path
         path = posixpath.join(artifact_dir, artifact_path) if artifact_path else artifact_dir
-        with self.pool.get_sfp_connection() as sftp:
+        with self.pool.get_sftp_connection() as sftp:
             return sftp.isdir(path)
 
     def list_artifacts(self, path=None):
         artifact_dir = self.path
         list_dir = posixpath.join(artifact_dir, path) if path else artifact_dir
-        with self.pool.get_sfp_connection() as sftp:
+        with self.pool.get_sftp_connection() as sftp:
             if not sftp.isdir(list_dir):
                 return []
             artifact_files = sftp.listdir(list_dir)
@@ -124,12 +124,12 @@ class SFTPArtifactRepository(ArtifactRepository):
 
     def _download_file(self, remote_file_path, local_path):
         remote_full_path = posixpath.join(self.path, remote_file_path)
-        with self.pool.get_sfp_connection() as sftp:
+        with self.pool.get_sftp_connection() as sftp:
             sftp.get(remote_full_path, local_path)
 
     def delete_artifacts(self, artifact_path=None):
         artifact_dir = posixpath.join(self.path, artifact_path) if artifact_path else self.path
-        with self.pool.get_sfp_connection() as sftp:
+        with self.pool.get_sftp_connection() as sftp:
             self._delete_inner(artifact_dir, sftp)
 
     def _delete_inner(self, artifact_path, sftp):

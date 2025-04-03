@@ -1,10 +1,11 @@
-import mlflow
 import json
-import numpy as np
-from pmdarima import auto_arima
-from pmdarima.datasets import load_wineind
-from pmdarima import model_selection
 
+import numpy as np
+from pmdarima import auto_arima, model_selection
+from pmdarima.datasets import load_wineind
+
+import mlflow
+from mlflow.models import infer_signature
 
 ARTIFACT_PATH = "model"
 
@@ -44,14 +45,18 @@ with mlflow.start_run():
     print(f"Metrics: \n{json.dumps(metrics, indent=2)}")
     print(f"Parameters: \n{json.dumps(parameters, indent=2)}")
 
-    mlflow.pmdarima.log_model(pmdarima_model=arima, artifact_path=ARTIFACT_PATH)
+    predictions = arima.predict(n_periods=30, return_conf_int=False)
+    signature = infer_signature(train, predictions)
+
+    model_info = mlflow.pmdarima.log_model(
+        pmdarima_model=arima, artifact_path=ARTIFACT_PATH, signature=signature
+    )
     mlflow.log_params(parameters)
     mlflow.log_metrics(metrics)
-    model_uri = mlflow.get_artifact_uri(ARTIFACT_PATH)
 
-    print(f"Model artifact logged to: {model_uri}")
+    print(f"Model artifact logged to: {model_info.model_uri}")
 
-loaded_model = mlflow.pmdarima.load_model(model_uri)
+loaded_model = mlflow.pmdarima.load_model(model_info.model_uri)
 
 forecast = loaded_model.predict(30)
 

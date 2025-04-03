@@ -1,4 +1,5 @@
 from abc import ABCMeta, abstractmethod
+
 from mlflow.utils.annotations import developer_stable
 
 
@@ -18,18 +19,17 @@ class RunContextProvider:
 
     @abstractmethod
     def in_context(self):
-        """
-        Determine if MLflow is running in this context.
+        """Determine if MLflow is running in this context.
 
-        :return: bool indicating if in this context
+        Returns:
+            bool indicating if in this context.
+
         """
-        pass
 
     @abstractmethod
     def tags(self):
-        """
-        Generate context-specific tags.
+        """Generate context-specific tags.
 
-        :return: dict of tags
+        Returns:
+            dict of tags.
         """
-        pass

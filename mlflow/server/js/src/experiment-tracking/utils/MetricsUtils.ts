@@ -1,5 +1,7 @@
 import { defineMessages, MessageDescriptor } from 'react-intl';
-import Utils from '../../common/utils/Utils';
+// @ts-expect-error TS(7016): Could not find a declaration file for module 'date... Remove this comment to see the full error message
+import dateFormat from 'dateformat';
+import { MLFLOW_SYSTEM_METRIC_PREFIX } from '../constants';
 
 interface MetricHistoryEntry {
   key: string;
@@ -58,12 +60,7 @@ export const normalizeInfinity = (value: number | string) => {
  * extermal ("infinity-like") metric values to NaN values so they will be
  * displayed correctly on plot.
  */
-export const normalizeMetricsHistoryEntry = ({
-  key,
-  timestamp,
-  value,
-  step,
-}: MetricHistoryEntry) => ({
+export const normalizeMetricsHistoryEntry = ({ key, timestamp, value, step }: MetricHistoryEntry) => ({
   key: key,
   value: normalizeInfinity(value),
   step: step || 0,
@@ -167,7 +164,8 @@ export const getAveragedPositionOnXAxis = (
     const d2msecs = new Date(date2).getTime(); // get milliseconds
 
     const avgTime = (d1msecs + d2msecs) / 2;
-    return Utils.formatTimestamp(new Date(avgTime).getTime(), 'yyyy-mm-dd HH:MM:ss.l');
+
+    return dateFormat(new Date(avgTime), 'yyyy-mm-dd HH:MM:ss.l');
   }
 
   return ((xValues[startIndex] as number) + (xValues[endIndex] as number)) / 2;
@@ -339,3 +337,22 @@ export const generateInfinityAnnotations = ({
     annotations: [...nanAnnotations, ...posInfAnnotations, ...negInfAnnotations],
   };
 };
+
+export const truncateChartMetricString = (fullStr: string, strLen: number) => {
+  if (fullStr.length <= strLen) return fullStr;
+
+  const separator = '...';
+
+  const sepLen = separator.length,
+    charsToShow = strLen - sepLen,
+    frontChars = Math.ceil(charsToShow / 2),
+    backChars = Math.floor(charsToShow / 2);
+
+  return fullStr.substr(0, frontChars) + separator + fullStr.substr(fullStr.length - backChars);
+};
+
+const systemMetricPrefix = new RegExp(`^${MLFLOW_SYSTEM_METRIC_PREFIX}`);
+
+export const isSystemMetricKey = (metricKey: string) => metricKey.match(systemMetricPrefix);
+
+export const EXPERIMENT_RUNS_METRIC_AUTO_REFRESH_INTERVAL = 30000;

@@ -1,23 +1,24 @@
+import importlib
 import logging
 import os
-import time
-import importlib
 import sys
+import time
+from enum import Enum
 from functools import partial
+from multiprocessing.pool import Pool, ThreadPool
+
 import numpy as np
 import pandas as pd
-from enum import Enum
-from multiprocessing.pool import ThreadPool, Pool
+from packaging.version import Version
 
+from mlflow.exceptions import BAD_REQUEST, INVALID_PARAMETER_VALUE, MlflowException
 from mlflow.recipes.artifacts import DataframeArtifact
 from mlflow.recipes.cards import BaseCard
-from mlflow.recipes.step import BaseStep
-from mlflow.recipes.step import StepClass
+from mlflow.recipes.step import BaseStep, StepClass
 from mlflow.recipes.utils.execution import get_step_output_path
 from mlflow.recipes.utils.step import get_pandas_data_profiles, validate_classification_config
-from mlflow.exceptions import MlflowException, INVALID_PARAMETER_VALUE, BAD_REQUEST
 from mlflow.store.artifact.artifact_repo import _NUM_DEFAULT_CPUS
-
+from mlflow.utils.time import Timer
 
 _logger = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ def _get_split_df(input_df, hash_buckets, split_ratios):
 
 
 def _parallelize(data, func, n_jobs=-1):
-    n_jobs = n_jobs if n_jobs > 0 and n_jobs <= _NUM_DEFAULT_CPUS else _NUM_DEFAULT_CPUS
+    n_jobs = n_jobs if 0 < n_jobs <= _NUM_DEFAULT_CPUS else _NUM_DEFAULT_CPUS
     data_split = np.array_split(data, n_jobs)
     pool = Pool(n_jobs)
     data = pd.concat(pool.map(func, data_split))
@@ -130,6 +131,8 @@ def _parallelize(data, func, n_jobs=-1):
 
 
 def _run_on_subset(func, data_subset):
+    if Version(pd.__version__) >= Version("2.1.0"):
+        return data_subset.map(func)
     return data_subset.applymap(func)
 
 
@@ -148,14 +151,13 @@ def _create_hash_buckets(input_df, n_jobs=-1):
     # Create hash bucket used for splitting dataset
     # Note: use `hash_pandas_object` instead of python builtin hash because it is stable
     # across different process runs / different python versions
-    start_time = time.time()
-    hash_buckets = _hash_pandas_dataframe(input_df, n_jobs=n_jobs).map(
-        lambda x: (x % _SPLIT_HASH_BUCKET_NUM) / _SPLIT_HASH_BUCKET_NUM
-    )
-    execution_duration = time.time() - start_time
+    with Timer() as t:
+        hash_buckets = _hash_pandas_dataframe(input_df, n_jobs=n_jobs).map(
+            lambda x: (x % _SPLIT_HASH_BUCKET_NUM) / _SPLIT_HASH_BUCKET_NUM
+        )
     _logger.debug(
         f"Creating hash buckets on input dataset containing {len(input_df)} "
-        f"rows consumes {execution_duration} seconds."
+        f"rows consumes {t:.3f} seconds."
     )
     return hash_buckets
 
@@ -236,8 +238,7 @@ class SplitStep(BaseStep):
 
         if "split_method" not in self.step_config and self.step_config["using"] == "custom":
             raise MlflowException(
-                "Missing 'split_method' configuration in the split step, "
-                "which is using 'custom'.",
+                "Missing 'split_method' configuration in the split step, which is using 'custom'.",
                 error_code=INVALID_PARAMETER_VALUE,
             )
 
@@ -346,23 +347,31 @@ class SplitStep(BaseStep):
                 "Return type of the custom split function should be a pandas series",
                 error_code=INVALID_PARAMETER_VALUE,
             )
-        train_df = validation_df = test_df = pd.DataFrame()
-        for index, value in custom_split_mapping_series.items():
-            if value == SplitValues.TRAINING.value:
-                train_df = pd.concat([train_df, input_df.iloc[[index]]], ignore_index=True)
-            elif value == SplitValues.VALIDATION.value:
-                validation_df = pd.concat(
-                    [validation_df, input_df.iloc[[index]]], ignore_index=True
+
+        copy_df = input_df.copy()
+        copy_df["split"] = custom_split_mapping_series
+        train_df = input_df[copy_df["split"] == SplitValues.TRAINING.value].reset_index(drop=True)
+        validation_df = input_df[copy_df["split"] == SplitValues.VALIDATION.value].reset_index(
+            drop=True
+        )
+        test_df = input_df[copy_df["split"] == SplitValues.TEST.value].reset_index(drop=True)
+
+        if train_df.size + validation_df.size + test_df.size != input_df.size:
+            incorrect_args = custom_split_mapping_series[
+                ~custom_split_mapping_series.isin(
+                    [
+                        SplitValues.TRAINING.value,
+                        SplitValues.VALIDATION.value,
+                        SplitValues.TEST.value,
+                    ]
                 )
-            elif value == SplitValues.TEST.value:
-                test_df = pd.concat([test_df, input_df.iloc[[index]]], ignore_index=True)
-            else:
-                raise MlflowException(
-                    f"Returned pandas series from custom split step should only contain "
-                    f"{SplitValues.TRAINING.value}, {SplitValues.VALIDATION.value} or "
-                    f"{SplitValues.TEST.value} as values. Value returned back instead: {value}",
-                    error_code=INVALID_PARAMETER_VALUE,
-                )
+            ].unique()
+            raise MlflowException(
+                f"Returned pandas series from custom split step should only contain "
+                f"{SplitValues.TRAINING.value}, {SplitValues.VALIDATION.value} or "
+                f"{SplitValues.TEST.value} as values. Value returned back: {incorrect_args}",
+                error_code=INVALID_PARAMETER_VALUE,
+            )
 
         return train_df, validation_df, test_df
 
@@ -427,8 +436,6 @@ class SplitStep(BaseStep):
                 f"Running {post_split_filter_config} on train, validation and test datasets."
             )
             train_df = train_df[post_split_filter(train_df)]
-            validation_df = validation_df[post_split_filter(validation_df)]
-            test_df = test_df[post_split_filter(test_df)]
 
         if min(len(train_df), len(validation_df), len(test_df)) < 4:
             raise MlflowException(

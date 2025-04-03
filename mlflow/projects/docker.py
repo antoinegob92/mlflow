@@ -2,21 +2,21 @@ import logging
 import os
 import posixpath
 import shutil
+import subprocess
 import tempfile
 import urllib.parse
 import urllib.request
-import subprocess
 
 import docker
-
 from mlflow import tracking
-from mlflow.projects.utils import get_databricks_env_vars
+from mlflow.environment_variables import MLFLOW_TRACKING_URI
 from mlflow.exceptions import ExecutionException
 from mlflow.projects.utils import MLFLOW_DOCKER_WORKDIR_PATH
-from mlflow.utils import process, file_utils
-from mlflow.utils.mlflow_tags import MLFLOW_DOCKER_IMAGE_URI, MLFLOW_DOCKER_IMAGE_ID
+from mlflow.utils import file_utils, process
+from mlflow.utils.databricks_utils import get_databricks_env_vars
 from mlflow.utils.file_utils import _handle_readonly_on_windows
 from mlflow.utils.git_utils import get_git_commit
+from mlflow.utils.mlflow_tags import MLFLOW_DOCKER_IMAGE_ID, MLFLOW_DOCKER_IMAGE_URI
 
 _logger = logging.getLogger(__name__)
 
@@ -108,12 +108,10 @@ def build_docker_image(work_dir, repository_uri, base_image, run_id, build_image
 
 def _get_docker_image_uri(repository_uri, work_dir):
     """
-    Returns an appropriate Docker image URI for a project based on the git hash of the specified
-    working directory.
-
-    :param repository_uri: The URI of the Docker repository with which to tag the image. The
-                           repository URI is used as the prefix of the image URI.
-    :param work_dir: Path to the working directory in which to search for a git commit hash
+    Args:
+        repository_uri: The URI of the Docker repository with which to tag the image. The
+            repository URI is used as the prefix of the image URI.
+        work_dir: Path to the working directory in which to search for a git commit hash
     """
     repository_uri = repository_uri if repository_uri else "docker-project"
     # Optionally include first 7 digits of git SHA in tag name, if available.
@@ -148,7 +146,7 @@ def get_docker_tracking_cmd_and_envs(tracking_uri):
     local_path, container_tracking_uri = _get_local_uri_or_none(tracking_uri)
     if local_path is not None:
         cmds = ["-v", f"{local_path}:{_MLFLOW_DOCKER_TRACKING_DIR_PATH}"]
-        env_vars[tracking._TRACKING_URI_ENV_VAR] = container_tracking_uri
+        env_vars[MLFLOW_TRACKING_URI.name] = container_tracking_uri
     env_vars.update(get_databricks_env_vars(tracking_uri))
     return cmds, env_vars
 

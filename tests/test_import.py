@@ -1,13 +1,15 @@
 import os
+import shutil
 import subprocess
 import sys
 import uuid
-import shutil
 
 import pytest
 
+from mlflow.utils.os import is_windows
 
-@pytest.mark.skipif(os.name == "nt", reason="This test fails on Windows")
+
+@pytest.mark.skipif(is_windows(), reason="This test fails on Windows")
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker is required to run this test")
 def test_import_mlflow(tmp_path):
     tmp_script = tmp_path.joinpath("test.sh")

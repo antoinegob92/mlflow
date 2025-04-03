@@ -1,27 +1,28 @@
 import {
   Button,
   ChevronDownIcon,
+  ColumnsIcon,
   Dropdown,
   Input,
-  ListIcon,
-  Search1Icon,
+  SearchIcon,
   Tree,
+  useDesignSystemTheme,
 } from '@databricks/design-system';
 import { Theme } from '@emotion/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FormattedMessage } from 'react-intl';
 import Utils from '../../../../../common/utils/Utils';
 import { ATTRIBUTE_COLUMN_LABELS, COLUMN_TYPES } from '../../../../constants';
-import { UpdateExperimentSearchFacetsFn } from '../../../../types';
+import { useUpdateExperimentViewUIState } from '../../contexts/ExperimentPageUIStateContext';
 import { useExperimentIds } from '../../hooks/useExperimentIds';
-import { useFetchExperimentRuns } from '../../hooks/useFetchExperimentRuns';
-import { SearchExperimentRunsFacetsState } from '../../models/SearchExperimentRunsFacetsState';
+import { ExperimentPageUIState } from '../../models/ExperimentPageUIState';
 import {
   extractCanonicalSortKey,
   isCanonicalSortKeyOfType,
   makeCanonicalSortKey,
-} from '../../utils/experimentPage.column-utils';
+} from '../../utils/experimentPage.common-utils';
 import { ExperimentRunsSelectorResult } from '../../utils/experimentRuns.selector';
+import { customMetricBehaviorDefs } from '../../utils/customMetricBehaviorUtils';
 
 /**
  * We need to recreate antd's tree check callback signature since it's not importable
@@ -41,13 +42,26 @@ const GROUP_KEY_PARAMS = makeCanonicalSortKey(GROUP_KEY, COLUMN_TYPES.PARAMS);
 const GROUP_KEY_METRICS = makeCanonicalSortKey(GROUP_KEY, COLUMN_TYPES.METRICS);
 const GROUP_KEY_TAGS = makeCanonicalSortKey(GROUP_KEY, COLUMN_TYPES.TAGS);
 
-const ATTRIBUTE_COLUMNS = [
-  ATTRIBUTE_COLUMN_LABELS.USER,
-  ATTRIBUTE_COLUMN_LABELS.SOURCE,
-  ATTRIBUTE_COLUMN_LABELS.VERSION,
-  ATTRIBUTE_COLUMN_LABELS.MODELS,
-];
-const ATTRIBUTE_COLUMNS_COMPARE = [ATTRIBUTE_COLUMN_LABELS.EXPERIMENT_NAME, ...ATTRIBUTE_COLUMNS];
+/**
+ * Returns all usable attribute columns basing on view mode and enabled flagged features
+ */
+const getAttributeColumns = (isComparing: boolean) => {
+  const result = [
+    ATTRIBUTE_COLUMN_LABELS.USER,
+    ATTRIBUTE_COLUMN_LABELS.SOURCE,
+    ATTRIBUTE_COLUMN_LABELS.VERSION,
+    ATTRIBUTE_COLUMN_LABELS.MODELS,
+    ATTRIBUTE_COLUMN_LABELS.DESCRIPTION,
+  ];
+
+  if (isComparing) {
+    result.unshift(ATTRIBUTE_COLUMN_LABELS.EXPERIMENT_NAME);
+  }
+
+  result.unshift(ATTRIBUTE_COLUMN_LABELS.DATASET);
+
+  return result;
+};
 
 /**
  * Function filters list of string by a given query string.
@@ -82,43 +96,39 @@ export interface ExperimentViewRunsColumnSelectorProps {
   runsData: ExperimentRunsSelectorResult;
   columnSelectorVisible: boolean;
   onChangeColumnSelectorVisible: (value: boolean) => void;
+  selectedColumns: string[];
 }
 
 /**
  * A component displaying the searchable column list - implementation.
  */
-export const ExperimentViewRunsColumnSelectorImpl = React.memo(
+export const ExperimentViewRunsColumnSelector = React.memo(
   ({
     runsData,
     columnSelectorVisible,
     onChangeColumnSelectorVisible,
-    updateSearchFacets,
     selectedColumns,
-  }: ExperimentViewRunsColumnSelectorProps & {
-    updateSearchFacets: UpdateExperimentSearchFacetsFn;
-    selectedColumns: SearchExperimentRunsFacetsState['selectedColumns'];
-  }) => {
+  }: ExperimentViewRunsColumnSelectorProps) => {
+    const updateUIState = useUpdateExperimentViewUIState();
     const experimentIds = useExperimentIds();
     const [filter, setFilter] = useState('');
+    const { theme } = useDesignSystemTheme();
 
     const searchInputRef = useRef<any>(null);
     const scrollableContainerRef = useRef<HTMLDivElement>(null);
     const buttonRef = useRef<HTMLButtonElement>(null);
 
     // Extract all attribute columns
-    const attributeColumnNames = useMemo(
-      () => (experimentIds.length > 1 ? ATTRIBUTE_COLUMNS_COMPARE : ATTRIBUTE_COLUMNS),
-      [experimentIds.length],
-    );
+    const attributeColumnNames = useMemo(() => getAttributeColumns(experimentIds.length > 1), [experimentIds.length]);
 
     const setCheckedColumns = useCallback(
       (updateFn: (existingCheckedColumns: string[]) => string[]) =>
-        updateSearchFacets((facets) => {
+        updateUIState((facets: ExperimentPageUIState) => {
           const newColumns = updateFn(facets.selectedColumns);
           const uniqueNewColumns = Array.from(new Set(newColumns));
           return { ...facets, selectedColumns: uniqueNewColumns };
         }),
-      [updateSearchFacets],
+      [updateUIState],
     );
 
     // Extract unique list of tags
@@ -130,12 +140,8 @@ export const ExperimentViewRunsColumnSelectorImpl = React.memo(
         [COLUMN_TYPES.ATTRIBUTES]: attributeColumnNames.map((key) =>
           makeCanonicalSortKey(COLUMN_TYPES.ATTRIBUTES, key),
         ),
-        [COLUMN_TYPES.PARAMS]: runsData.paramKeyList.map((key) =>
-          makeCanonicalSortKey(COLUMN_TYPES.PARAMS, key),
-        ),
-        [COLUMN_TYPES.METRICS]: runsData.metricKeyList.map((key) =>
-          makeCanonicalSortKey(COLUMN_TYPES.METRICS, key),
-        ),
+        [COLUMN_TYPES.PARAMS]: runsData.paramKeyList.map((key) => makeCanonicalSortKey(COLUMN_TYPES.PARAMS, key)),
+        [COLUMN_TYPES.METRICS]: runsData.metricKeyList.map((key) => makeCanonicalSortKey(COLUMN_TYPES.METRICS, key)),
         [COLUMN_TYPES.TAGS]: tagsKeyList.map((key) => makeCanonicalSortKey(COLUMN_TYPES.TAGS, key)),
       }),
       [runsData, attributeColumnNames, tagsKeyList],
@@ -165,10 +171,13 @@ export const ExperimentViewRunsColumnSelectorImpl = React.memo(
         result.push({
           key: GROUP_KEY_METRICS,
           title: `Metrics (${filteredMetrics.length})`,
-          children: filteredMetrics.map((metricKey) => ({
-            key: makeCanonicalSortKey(COLUMN_TYPES.METRICS, metricKey),
-            title: createHighlightedNode(metricKey, filter),
-          })),
+          children: filteredMetrics.map((metricKey) => {
+            const customColumnDef = customMetricBehaviorDefs[metricKey];
+            return {
+              key: makeCanonicalSortKey(COLUMN_TYPES.METRICS, metricKey),
+              title: createHighlightedNode(customColumnDef?.displayName ?? metricKey, filter),
+            };
+          }),
         });
       }
       if (filteredParams.length) {
@@ -268,12 +277,31 @@ export const ExperimentViewRunsColumnSelectorImpl = React.memo(
 
     // A JSX block containing the dropdown
     const dropdownContent = (
-      <div css={styles.dropdown}>
+      <div
+        css={{
+          backgroundColor: theme.colors.backgroundPrimary,
+          width: 400,
+          border: `1px solid`,
+          borderColor: theme.colors.border,
+          [theme.responsive.mediaQueries.xs]: {
+            width: '100vw',
+          },
+        }}
+        onKeyDown={(e) => {
+          // Since we're controlling the visibility of the dropdown,
+          // we need to handle the escape key to close it.
+          if (e.key === 'Escape') {
+            onChangeColumnSelectorVisible(false);
+            buttonRef.current?.focus();
+          }
+        }}
+      >
         <div css={(theme) => ({ padding: theme.spacing.md })}>
           <Input
+            componentId="codegen_mlflow_app_src_experiment-tracking_components_experiment-page_components_runs_experimentviewrunscolumnselector.tsx_300"
             value={filter}
-            prefix={<Search1Icon />}
-            placeholder='Search columns'
+            prefix={<SearchIcon />}
+            placeholder="Search columns"
             allowClear
             ref={searchInputRef}
             onChange={(e) => {
@@ -282,20 +310,33 @@ export const ExperimentViewRunsColumnSelectorImpl = React.memo(
             onKeyDown={searchInputKeyDown}
           />
         </div>
-        <div ref={scrollableContainerRef} css={styles.scrollableContainer}>
+        <div
+          ref={scrollableContainerRef}
+          css={{
+            // Maximum height of 15 elements times 32 pixels as defined in
+            // design-system/src/design-system/Tree/Tree.tsx
+            maxHeight: 15 * 32,
+            overflowY: 'scroll',
+            overflowX: 'hidden',
+            paddingBottom: theme.spacing.md,
+            'span[title]': {
+              whiteSpace: 'nowrap',
+              textOverflow: 'ellipsis',
+              overflow: 'hidden',
+            },
+            [theme.responsive.mediaQueries.xs]: {
+              maxHeight: 'calc(100vh - 100px)',
+            },
+          }}
+        >
           <Tree
-            data-testid='column-selector-tree'
-            mode='checkable'
+            data-testid="column-selector-tree"
+            mode="checkable"
             dangerouslySetAntdProps={{
               checkedKeys: selectedColumns,
               onCheck,
             }}
-            defaultExpandedKeys={[
-              GROUP_KEY_ATTRIBUTES,
-              GROUP_KEY_PARAMS,
-              GROUP_KEY_METRICS,
-              GROUP_KEY_TAGS,
-            ]}
+            defaultExpandedKeys={[GROUP_KEY_ATTRIBUTES, GROUP_KEY_PARAMS, GROUP_KEY_METRICS, GROUP_KEY_TAGS]}
             treeData={treeData}
           />
         </div>
@@ -305,20 +346,21 @@ export const ExperimentViewRunsColumnSelectorImpl = React.memo(
     return (
       <Dropdown
         overlay={dropdownContent}
-        placement='bottomRight'
+        placement="bottomLeft"
         trigger={['click']}
         visible={columnSelectorVisible}
         onVisibleChange={onChangeColumnSelectorVisible}
       >
         <Button
+          componentId="codegen_mlflow_app_src_experiment-tracking_components_experiment-page_components_runs_experimentviewrunscolumnselector.tsx_315"
           ref={buttonRef}
           style={{ display: 'flex', alignItems: 'center' }}
-          data-testid='column-selection-dropdown'
-          icon={<ListIcon />}
+          data-testid="column-selection-dropdown"
+          icon={<ColumnsIcon />}
         >
           <FormattedMessage
-            defaultMessage='Columns'
-            description='Dropdown text to display columns names that could to be rendered for the experiment runs table'
+            defaultMessage="Columns"
+            description="Dropdown text to display columns names that could to be rendered for the experiment runs table"
           />{' '}
           <ChevronDownIcon />
         </Button>
@@ -326,40 +368,3 @@ export const ExperimentViewRunsColumnSelectorImpl = React.memo(
     );
   },
 );
-
-/**
- * A component displaying the searchable column list.
- * This is a thin layer wrapping the implementation to optimize search state rerenders.
- */
-export const ExperimentViewRunsColumnSelector = (props: ExperimentViewRunsColumnSelectorProps) => {
-  const { updateSearchFacets, searchFacetsState } = useFetchExperimentRuns();
-  return (
-    <ExperimentViewRunsColumnSelectorImpl
-      {...props}
-      selectedColumns={searchFacetsState.selectedColumns}
-      updateSearchFacets={updateSearchFacets}
-    />
-  );
-};
-
-const styles = {
-  dropdown: (theme: Theme) => ({
-    backgroundColor: theme.colors.white,
-    width: 400,
-    border: `1px solid`,
-    borderColor: theme.colors.border,
-  }),
-  scrollableContainer: (theme: Theme) => ({
-    // Maximum height of 15 elements times 32 pixels as defined in
-    // design-system/src/design-system/Tree/Tree.tsx
-    maxHeight: 15 * 32,
-    overflowY: 'scroll' as const,
-    overflowX: 'hidden' as const,
-    paddingBottom: theme.spacing.md,
-    'span[title]': {
-      whiteSpace: 'nowrap' as const,
-      textOverflow: 'ellipsis',
-      overflow: 'hidden',
-    },
-  }),
-};

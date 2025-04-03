@@ -1,40 +1,42 @@
 """
 The ``mlflow.projects`` module provides an API for running MLflow projects locally or remotely.
 """
+
 import json
-import yaml
-import os
 import logging
+import os
+
+import yaml
 
 import mlflow.projects.databricks
+import mlflow.utils.uri
 from mlflow import tracking
 from mlflow.entities import RunStatus
 from mlflow.exceptions import ExecutionException, MlflowException
+from mlflow.projects.backend import loader
 from mlflow.projects.submitted_run import SubmittedRun
 from mlflow.projects.utils import (
-    PROJECT_SYNCHRONOUS,
-    get_entry_point_command,
-    get_run_env_vars,
-    fetch_and_validate_project,
-    get_or_create_run,
-    load_project,
     MLFLOW_LOCAL_BACKEND_RUN_ID_CONFIG,
+    PROJECT_BUILD_IMAGE,
+    PROJECT_DOCKER_ARGS,
+    PROJECT_DOCKER_AUTH,
     PROJECT_ENV_MANAGER,
     PROJECT_STORAGE_DIR,
-    PROJECT_DOCKER_ARGS,
-    PROJECT_BUILD_IMAGE,
-    PROJECT_DOCKER_AUTH,
+    PROJECT_SYNCHRONOUS,
+    fetch_and_validate_project,
+    get_entry_point_command,
+    get_or_create_run,
+    get_run_env_vars,
+    load_project,
 )
-from mlflow.projects.backend import loader
 from mlflow.tracking.fluent import _get_experiment_id
-from mlflow.utils.mlflow_tags import (
-    MLFLOW_PROJECT_ENV,
-    MLFLOW_PROJECT_BACKEND,
-    MLFLOW_RUN_NAME,
-    MLFLOW_DOCKER_IMAGE_ID,
-)
 from mlflow.utils import env_manager as _EnvManager
-import mlflow.utils.uri
+from mlflow.utils.mlflow_tags import (
+    MLFLOW_DOCKER_IMAGE_ID,
+    MLFLOW_PROJECT_BACKEND,
+    MLFLOW_PROJECT_ENV,
+    MLFLOW_RUN_NAME,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -48,9 +50,12 @@ def _resolve_experiment_id(experiment_name=None, experiment_id=None):
     If ``experiment_name`` is provided and does not exist, an experiment
     of that name is created and its id is returned.
 
-    :param experiment_name: Name of experiment under which to launch the run.
-    :param experiment_id: ID of experiment under which to launch the run.
-    :return: str
+    Args:
+        experiment_name: Name of experiment under which to launch the run.
+        experiment_id: ID of experiment under which to launch the run.
+
+    Returns:
+        str
     """
 
     if experiment_name and experiment_id:
@@ -133,7 +138,19 @@ def _run(
         tracking.MlflowClient().set_tag(
             active_run.info.run_id, MLFLOW_PROJECT_BACKEND, "databricks"
         )
-        from mlflow.projects.databricks import run_databricks
+        from mlflow.projects.databricks import run_databricks, run_databricks_spark_job
+
+        if project.databricks_spark_job_spec is not None:
+            return run_databricks_spark_job(
+                remote_run=active_run,
+                uri=uri,
+                work_dir=work_dir,
+                experiment_id=experiment_id,
+                cluster_spec=backend_config,
+                project_spec=project,
+                entry_point=entry_point,
+                parameters=parameters,
+            )
 
         return run_databricks(
             remote_run=active_run,
@@ -147,12 +164,12 @@ def _run(
         )
 
     elif backend_name == "kubernetes":
+        from mlflow.projects import kubernetes as kb
         from mlflow.projects.docker import (
             build_docker_image,
             validate_docker_env,
             validate_docker_installation,
         )
-        from mlflow.projects import kubernetes as kb
 
         tracking.MlflowClient().set_tag(active_run.info.run_id, MLFLOW_PROJECT_ENV, "docker")
         tracking.MlflowClient().set_tag(
@@ -173,7 +190,7 @@ def _run(
         tracking.MlflowClient().set_tag(
             active_run.info.run_id, MLFLOW_DOCKER_IMAGE_ID, image_digest
         )
-        submitted_run = kb.run_kubernetes_job(
+        return kb.run_kubernetes_job(
             project.name,
             active_run,
             image.tags[0],
@@ -185,12 +202,10 @@ def _run(
             kube_config.get("kube-context", None),
             kube_config["kube-job-template"],
         )
-        return submitted_run
 
     supported_backends = ["databricks", "kubernetes"] + list(loader.MLFLOW_BACKENDS.keys())
     raise ExecutionException(
-        "Got unsupported execution mode %s. Supported "
-        "values: %s" % (backend_name, supported_backends)
+        f"Got unsupported execution mode {backend_name}. Supported values: {supported_backends}"
     )
 
 
@@ -223,66 +238,70 @@ def run(
     For information on using this method in chained workflows, see `Building Multistep Workflows
     <../projects.html#building-multistep-workflows>`_.
 
-    :raises: :py:class:`mlflow.exceptions.ExecutionException` If a run launched in blocking mode
-             is unsuccessful.
+    Raises:
+        :py:class:`mlflow.exceptions.ExecutionException` If a run launched in blocking mode
+            is unsuccessful.
 
-    :param uri: URI of project to run. A local filesystem path
-                or a Git repository URI (e.g. https://github.com/mlflow/mlflow-example)
-                pointing to a project directory containing an MLproject file.
-    :param entry_point: Entry point to run within the project. If no entry point with the specified
-                        name is found, runs the project file ``entry_point`` as a script,
-                        using "python" to run ``.py`` files and the default shell (specified by
-                        environment variable ``$SHELL``) to run ``.sh`` files.
-    :param version: For Git-based projects, either a commit hash or a branch name.
-    :param parameters: Parameters (dictionary) for the entry point command.
-    :param docker_args: Arguments (dictionary) for the docker command.
-    :param experiment_name: Name of experiment under which to launch the run.
-    :param experiment_id: ID of experiment under which to launch the run.
-    :param backend: Execution backend for the run: MLflow provides built-in support for "local",
-                    "databricks", and "kubernetes" (experimental) backends. If running against
-                    Databricks, will run against a Databricks workspace determined as follows:
-                    if a Databricks tracking URI of the form ``databricks://profile`` has been set
-                    (e.g. by setting the MLFLOW_TRACKING_URI environment variable), will run
-                    against the workspace specified by <profile>. Otherwise, runs against the
-                    workspace specified by the default Databricks CLI profile.
-    :param backend_config: A dictionary, or a path to a JSON file (must end in '.json'), which will
-                           be passed as config to the backend. The exact content which should be
-                           provided is different for each execution backend and is documented
-                           at https://www.mlflow.org/docs/latest/projects.html.
-    :param storage_dir: Used only if ``backend`` is "local". MLflow downloads artifacts from
-                        distributed URIs passed to parameters of type ``path`` to subdirectories of
-                        ``storage_dir``.
-    :param synchronous: Whether to block while waiting for a run to complete. Defaults to True.
-                        Note that if ``synchronous`` is False and ``backend`` is "local", this
-                        method will return, but the current process will block when exiting until
-                        the local run completes. If the current process is interrupted, any
-                        asynchronous runs launched via this method will be terminated. If
-                        ``synchronous`` is True and the run fails, the current process will
-                        error out as well.
-    :param run_id: Note: this argument is used internally by the MLflow project APIs and should
-                   not be specified. If specified, the run ID will be used instead of
-                   creating a new run.
-    :param run_name: The name to give the MLflow Run associated with the project execution.
-                     If ``None``, the MLflow Run name is left unset.
-    :param env_manager: Specify an environment manager to create a new environment for the run and
-                        install project dependencies within that environment. The following values
-                        are supported:
+    Args:
+        uri: URI of project to run. A local filesystem path
+            or a Git repository URI (e.g. https://github.com/mlflow/mlflow-example)
+            pointing to a project directory containing an MLproject file.
+        entry_point: Entry point to run within the project. If no entry point with the specified
+            name is found, runs the project file ``entry_point`` as a script,
+            using "python" to run ``.py`` files and the default shell (specified by
+            environment variable ``$SHELL``) to run ``.sh`` files.
+        version: For Git-based projects, either a commit hash or a branch name.
+        parameters: Parameters (dictionary) for the entry point command.
+        docker_args: Arguments (dictionary) for the docker command.
+        experiment_name: Name of experiment under which to launch the run.
+        experiment_id: ID of experiment under which to launch the run.
+        backend: Execution backend for the run: MLflow provides built-in support for "local",
+            "databricks", and "kubernetes" (experimental) backends. If running against
+            Databricks, will run against a Databricks workspace determined as follows:
+            if a Databricks tracking URI of the form ``databricks://profile`` has been set
+            (e.g. by setting the MLFLOW_TRACKING_URI environment variable), will run
+            against the workspace specified by <profile>. Otherwise, runs against the
+            workspace specified by the default Databricks CLI profile.
+        backend_config: A dictionary, or a path to a JSON file (must end in '.json'), which will
+            be passed as config to the backend. The exact content which should be
+            provided is different for each execution backend and is documented
+            at https://www.mlflow.org/docs/latest/projects.html.
+        storage_dir: Used only if ``backend`` is "local". MLflow downloads artifacts from
+            distributed URIs passed to parameters of type ``path`` to subdirectories of
+            ``storage_dir``.
+        synchronous: Whether to block while waiting for a run to complete. Defaults to True.
+            Note that if ``synchronous`` is False and ``backend`` is "local", this
+            method will return, but the current process will block when exiting until
+            the local run completes. If the current process is interrupted, any
+            asynchronous runs launched via this method will be terminated. If
+            ``synchronous`` is True and the run fails, the current process will
+            error out as well.
+        run_id: Note: this argument is used internally by the MLflow project APIs and should
+            not be specified. If specified, the run ID will be used instead of
+            creating a new run.
+        run_name: The name to give the MLflow Run associated with the project execution.
+            If ``None``, the MLflow Run name is left unset.
+        env_manager: Specify an environment manager to create a new environment for the run and
+            install project dependencies within that environment. The following values
+            are supported:
 
-                        - local: use the local environment
-                        - virtualenv: use virtualenv (and pyenv for Python version management)
-                        - conda: use conda
+            - local: use the local environment
+            - virtualenv: use virtualenv (and pyenv for Python version management)
+            - conda: use conda
 
-                        If unspecified, MLflow automatically determines the environment manager to
-                        use by inspecting files in the project directory. For example, if
-                        ``python_env.yaml`` is present, virtualenv will be used.
-    :param build_image: Whether to build a new docker image of the project or to reuse an existing
-                        image. Default: False (reuse an existing image)
-    :param docker_auth: A dictionary representing information to authenticate with a Docker
-                        registry. See `docker.client.DockerClient.login
-                        <https://docker-py.readthedocs.io/en/stable/client.html#docker.client.DockerClient.login>`_
-                        for available options.
-    :return: :py:class:`mlflow.projects.SubmittedRun` exposing information (e.g. run ID)
-             about the launched run.
+            If unspecified, MLflow automatically determines the environment manager to
+            use by inspecting files in the project directory. For example, if
+            ``python_env.yaml`` is present, virtualenv will be used.
+        build_image: Whether to build a new docker image of the project or to reuse an existing
+            image. Default: False (reuse an existing image)
+        docker_auth: A dictionary representing information to authenticate with a Docker
+            registry. See `docker.client.DockerClient.login
+            <https://docker-py.readthedocs.io/en/stable/client.html#docker.client.DockerClient.login>`_
+            for available options.
+
+    Returns:
+        :py:class:`mlflow.projects.SubmittedRun` exposing information (e.g. run ID)
+        about the launched run.
 
     .. code-block:: python
         :caption: Example
@@ -369,7 +388,7 @@ def _wait_for(submitted_run_obj):
             _maybe_set_run_terminated(active_run, "FINISHED")
         else:
             _maybe_set_run_terminated(active_run, "FAILED")
-            raise ExecutionException("Run (ID '%s') failed" % run_id)
+            raise ExecutionException(f"Run (ID '{run_id}') failed")
     except KeyboardInterrupt:
         _logger.error("=== Run (ID '%s') interrupted, cancelling run ===", run_id)
         submitted_run_obj.cancel()

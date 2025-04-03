@@ -1,6 +1,6 @@
 import qs from 'qs';
 import { useMemo } from 'react';
-import { useLocation, useRouteMatch } from 'react-router';
+import { useParams, useLocation } from '../../../../common/utils/RoutingUtils';
 import Utils from '../../../../common/utils/Utils';
 
 export type UseExperimentIdsResult = string[];
@@ -14,13 +14,10 @@ export type UseExperimentIdsResult = string[];
  */
 
 export const useExperimentIds = (): UseExperimentIdsResult => {
-  const match = useRouteMatch<{ experimentId?: string }>();
+  const params = useParams<{ experimentId?: string }>();
   const location = useLocation();
 
-  const normalizedLocationSearch = useMemo(
-    () => decodeURIComponent(location.search),
-    [location.search],
-  );
+  const normalizedLocationSearch = useMemo(() => decodeURIComponent(location.search), [location.search]);
 
   /**
    * Memoized string containing experiment IDs for comparison ("?experiments=...")
@@ -37,8 +34,8 @@ export const useExperimentIds = (): UseExperimentIdsResult => {
 
   return useMemo(() => {
     // Case #1: single experiment
-    if (match.params?.experimentId) {
-      return [match.params?.experimentId];
+    if (params?.experimentId) {
+      return [params?.experimentId];
     }
 
     // Case #2: multiple (compare) experiments
@@ -47,13 +44,11 @@ export const useExperimentIds = (): UseExperimentIdsResult => {
         return JSON.parse(compareExperimentIdsQueryParam);
       } catch {
         // Apparently URL is malformed
-        Utils.logErrorAndNotifyUser(
-          `Could not parse experiment query parameter ${compareExperimentIdsQueryParam}`,
-        );
+        Utils.logErrorAndNotifyUser(`Could not parse experiment query parameter ${compareExperimentIdsQueryParam}`);
         return '';
       }
     }
 
     return [];
-  }, [compareExperimentIdsQueryParam, match.params?.experimentId]);
+  }, [compareExperimentIdsQueryParam, params?.experimentId]);
 };

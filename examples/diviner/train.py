@@ -1,9 +1,11 @@
 import tempfile
-from pmdarima import datasets
-import pandas as pd
-import numpy as np
 from datetime import datetime
+
+import numpy as np
+import pandas as pd
 from diviner import GroupedProphet
+from pmdarima import datasets
+
 import mlflow.diviner
 
 
@@ -14,12 +16,15 @@ def generate_data(location_data, start_dt) -> pd.DataFrame:
     Here we are taking a list of tuples as location data [(country, city)] and applying
     a random factor to each copy of the underlying series to generate data at different scales.
 
-    :param location_data: List[Tuple("country", "city")] for synthetic key grouping columns
-                          generation.
-    :param start_dt: String datetime value in the form of `YYYY-mm-dd HH:MM:SS`
-    :return: A Pandas DataFrame that is a concatenation of each entry of the location_data tuple
-             values with a datetime column added via hourly intervals for the duration of each
-             series. The original data is in hourly electrical consumption values.
+    Args:
+        location_data: List[Tuple("country", "city")] for synthetic key grouping columns
+            generation.
+        start_dt: String datetime value in the form of `YYYY-mm-dd HH:MM:SS`
+
+    Returns:
+        A Pandas DataFrame that is a concatenation of each entry of the location_data tuple
+        values with a datetime column added via hourly intervals for the duration of each
+        series. The original data is in hourly electrical consumption values.
     """
     raw_data = datasets.load_taylor(as_series=True)
     start = datetime.strptime(start_dt, "%Y-%m-%d %H:%M:%S")
@@ -39,11 +44,10 @@ def generate_data(location_data, start_dt) -> pd.DataFrame:
             )
         )
 
-    output = pd.concat(generated_listing).reset_index().drop("index", axis=1)
-    return output
+    return pd.concat(generated_listing).reset_index().drop("index", axis=1)
 
 
-def grouped_prophet_example(locations, start_dt, artifact_path):
+def grouped_prophet_example(locations, start_dt):
     print("Generating data...\n")
     data = generate_data(location_data=locations, start_dt=start_dt)
     grouping_keys = ["country", "city"]
@@ -69,7 +73,7 @@ def grouped_prophet_example(locations, start_dt, artifact_path):
     )
     print(f"Cross Validation Metrics: \n{metrics.to_string()}")
 
-    mlflow.diviner.log_model(diviner_model=model, artifact_path=artifact_path)
+    model_info = mlflow.diviner.log_model(diviner_model=model, artifact_path="diviner_model")
 
     # As an Alternative to saving metrics and params directly with a `log_dict()` function call,
     # Serializing the DataFrames to local as a .csv can be done as well, without requiring
@@ -95,7 +99,7 @@ def grouped_prophet_example(locations, start_dt, artifact_path):
 
     mlflow.log_dict(metrics.to_dict(), "metrics.json")
 
-    return mlflow.get_artifact_uri(artifact_path=artifact_path)
+    return model_info.model_uri
 
 
 if __name__ == "__main__":
@@ -108,10 +112,9 @@ if __name__ == "__main__":
         ("MX", "MexicoCity"),
     ]
     start_dt = "2022-02-01 04:11:35"
-    artifact_path = "diviner_model"
 
     with mlflow.start_run():
-        uri = grouped_prophet_example(locations, start_dt, artifact_path)
+        uri = grouped_prophet_example(locations, start_dt)
 
     loaded_model = mlflow.diviner.load_model(model_uri=uri)
 

@@ -1,28 +1,27 @@
 import logging
 import os
 import time
-from typing import Dict, Any
+from typing import Any
 
 import mlflow
-from mlflow.exceptions import MlflowException, BAD_REQUEST, INVALID_PARAMETER_VALUE
+from mlflow.exceptions import BAD_REQUEST, INVALID_PARAMETER_VALUE, MlflowException
 from mlflow.recipes.artifacts import DataframeArtifact, RegisteredModelVersionInfo
 from mlflow.recipes.cards import BaseCard
-from mlflow.recipes.step import BaseStep
-from mlflow.recipes.step import StepClass
+from mlflow.recipes.step import BaseStep, StepClass
 from mlflow.recipes.steps.register import _REGISTERED_MV_INFO_FILE
 from mlflow.recipes.utils.execution import get_step_output_path
 from mlflow.recipes.utils.step import get_pandas_data_profiles
 from mlflow.recipes.utils.tracking import (
-    get_recipe_tracking_config,
-    apply_recipe_tracking_config,
     TrackingConfig,
+    apply_recipe_tracking_config,
+    get_recipe_tracking_config,
 )
-from mlflow.projects.utils import get_databricks_env_vars
-from mlflow.utils.file_utils import write_spark_dataframe_to_parquet_on_local_disk
 from mlflow.utils._spark_utils import (
-    _get_active_spark_session,
     _create_local_spark_session_for_recipes,
+    _get_active_spark_session,
 )
+from mlflow.utils.databricks_utils import get_databricks_env_vars
+from mlflow.utils.file_utils import write_spark_dataframe_to_parquet_on_local_disk
 
 _logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ _ENV_MANAGER = "virtualenv"
 
 
 class PredictStep(BaseStep):
-    def __init__(self, step_config: Dict[str, Any], recipe_root: str) -> None:
+    def __init__(self, step_config: dict[str, Any], recipe_root: str) -> None:
         super().__init__(step_config, recipe_root)
         self.tracking_config = TrackingConfig.from_dict(self.step_config)
 
@@ -70,7 +69,7 @@ class PredictStep(BaseStep):
                 self.step_config["model_uri"] = f"models:/{model_name}/latest"
         self.registry_uri = self.step_config.get("registry_uri", None)
         self.skip_data_profiling = self.step_config.get("skip_data_profiling", False)
-        self.save_mode = self.step_config.get("save_mode", "default")
+        self.save_mode = self.step_config.get("save_mode", "overwrite")
         self.run_end_time = None
         self.execution_duration = None
 
@@ -226,9 +225,7 @@ class PredictStep(BaseStep):
                     "delta.minReaderVersion", "2"
                 ).property("delta.minWriterVersion", "5").property(
                     "delta.columnMapping.mode", "name"
-                ).tableName(
-                    output_location
-                ).execute()
+                ).tableName(output_location).execute()
                 # We are overriding the save_mode to append for the create case, since the table
                 # is already created above, so adding any record to the empty table can be
                 # appended to the table

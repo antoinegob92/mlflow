@@ -5,17 +5,14 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import pytorch_lightning as pl
+import lightning as L
 import torch
 from ax.service.ax_client import AxClient
+from mnist import LightningMNISTClassifier, MNISTDataModule
 from prettytable import PrettyTable
 from torch.nn.utils import prune
 
 import mlflow.pytorch
-from mnist import (
-    MNISTDataModule,
-    LightningMNISTClassifier,
-)
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
 
 
@@ -27,15 +24,14 @@ class IterativePrune:
         self.pruning_amount = None
 
     def run_mnist_model(self, base=False):
-        parser_dict = vars(self.parser_args)
         if base:
             mlflow.start_run(run_name="BaseModel")
         mlflow.pytorch.autolog()
-        dm = MNISTDataModule(**parser_dict)
+        dm = MNISTDataModule()
         dm.setup(stage="fit")
 
-        model = LightningMNISTClassifier(**parser_dict)
-        trainer = pl.Trainer.from_argparse_args(self.parser_args)
+        model = LightningMNISTClassifier()
+        trainer = L.Trainer(max_epochs=self.parser_args.max_epochs)
         trainer.fit(model, dm)
         trainer.test(datamodule=dm)
         if os.path.exists(self.base_model_path):
@@ -46,7 +42,9 @@ class IterativePrune:
     def load_base_model(self):
         path = Path(_download_artifact_from_uri(self.base_model_path))
         model_file_path = os.path.join(path, "data/model.pth")
-        return torch.load(model_file_path)
+        # Since torch 2.6, the default value of weights_only became True.
+        # To prevent UnpicklingError from happening, need to explicitly set weights_only=False.
+        return torch.load(model_file_path, weights_only=False)
 
     def initialize_ax_client(self):
         self.ax_client = AxClient()
@@ -60,7 +58,7 @@ class IterativePrune:
     @staticmethod
     def prune_and_save_model(model, amount):
         for _, module in model.named_modules():
-            if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.Linear):
+            if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear)):
                 prune.l1_unstructured(module, name="weight", amount=amount)
                 prune.remove(module, "weight")
 
@@ -85,8 +83,7 @@ class IterativePrune:
 
     @staticmethod
     def write_prune_summary(summary, params):
-        tempdir = tempfile.mkdtemp()
-        try:
+        with tempfile.TemporaryDirectory() as tempdir:
             summary_file = os.path.join(tempdir, "pruned_model_summary.txt")
             params = "Total Trainable Parameters :" + str(params)
             with open(summary_file, "w") as f:
@@ -95,8 +92,6 @@ class IterativePrune:
                 f.write(str(params))
 
             mlflow.log_artifact(local_path=summary_file)
-        finally:
-            shutil.rmtree(tempdir)
 
     def iterative_prune(self, model, parametrization):
         if not self.pruning_amount:
@@ -111,8 +106,7 @@ class IterativePrune:
         self.write_prune_summary(summary, params)
         trainer = self.run_mnist_model()
         metrics = trainer.callback_metrics
-        test_accuracy = metrics.get("avg_test_acc")
-        return test_accuracy
+        return metrics.get("avg_test_acc")
 
     def initiate_pruning_process(self, model):
         total_trials = int(vars(self.parser_args)["total_trials"])
@@ -121,7 +115,7 @@ class IterativePrune:
         for i in range(total_trials):
             parameters, trial_index = self.ax_client.get_next_trial()
             print("***************************************************************************")
-            print("Running Trial {}".format(i + 1))
+            print(f"Running Trial {i + 1}")
             print("***************************************************************************")
             with mlflow.start_run(nested=True, run_name="Iteration" + str(i)):
                 mlflow.set_tags({"AX_TRIAL": i})
@@ -137,12 +131,17 @@ class IterativePrune:
 
     def get_parser_args(self):
         parser = argparse.ArgumentParser()
-        parser = pl.Trainer.add_argparse_args(parent_parser=parser)
-        parser = LightningMNISTClassifier.add_model_specific_args(parent_parser=parser)
+        parser.add_argument(
+            "--max_epochs",
+            default=3,
+            type=int,
+            help="Number of AX trials to be run for the optimization experiment",
+        )
 
         parser.add_argument(
             "--total_trials",
             default=3,
+            type=int,
             help="Number of AX trials to be run for the optimization experiment",
         )
 

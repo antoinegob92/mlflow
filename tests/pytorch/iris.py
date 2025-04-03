@@ -1,15 +1,14 @@
-# pylint: disable=arguments-differ
-# pylint: disable=unused-argument
-# pylint: disable=abstract-method
+import tempfile
 
 import pytorch_lightning as pl
 import torch
-import torch.utils.tensorboard
-from torch import nn
 import torch.nn.functional as F
+import torch.utils.tensorboard
 from packaging.version import Version
+from torch import nn
 
-SUMMARY_WRITER = torch.utils.tensorboard.SummaryWriter()
+tmpdir = tempfile.mkdtemp()
+SUMMARY_WRITER = torch.utils.tensorboard.SummaryWriter(log_dir=tmpdir)
 
 
 def create_multiclass_accuracy():
@@ -17,13 +16,13 @@ def create_multiclass_accuracy():
     # (e.g., pytorch_lightning.metrics.Accuracy), while newer versions rely on the `torchmetrics`
     # package (e.g. `torchmetrics.Accuracy)
     try:
-        from torchmetrics import Accuracy
         import torchmetrics
+        from torchmetrics import Accuracy
 
         if Version(torchmetrics.__version__) >= Version("0.11"):
             return Accuracy(task="multiclass", num_classes=3)
         else:
-            return Accuracy()  # pylint: disable=no-value-for-parameter
+            return Accuracy()
     except ImportError:
         from pytorch_lightning.metrics import Accuracy
 
@@ -47,8 +46,7 @@ class IrisClassificationBase(pl.LightningModule):
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        return x
+        return F.relu(self.fc3(x))
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), 0.01)
@@ -102,6 +100,39 @@ class IrisClassificationWithoutValidation(IrisClassificationBase):
         self.test_acc(torch.argmax(logits, dim=1), y)
         self.log("test_loss", loss)
         self.log("test_acc", self.test_acc.compute())
+
+
+class IrisClassificationMultiOptimizer(IrisClassificationBase):
+    """
+    Contrived lightning module that uses multiple optimizers. In real-world scenarios
+    multiple optimizers might be used for Generative Adversarial Networks (GANs).
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.automatic_optimization = False
+
+    def training_step(self, batch, batch_idx):
+        opt1, opt2 = self.optimizers()
+
+        x, y = batch
+        logits = self.forward(x)
+        loss = self.cross_entropy_loss(logits, y)
+
+        opt1.zero_grad()
+        opt2.zero_grad()
+
+        self.manual_backward(loss)
+
+        opt1.step()
+        opt2.step()
+
+        self.log("loss", loss, on_epoch=True, on_step=True)
+
+    def configure_optimizers(self):
+        opt1 = torch.optim.Adam(self.parameters(), 0.01)
+        opt2 = torch.optim.Adam(self.parameters(), 0.01)
+        return [opt1, opt2]
 
 
 if __name__ == "__main__":

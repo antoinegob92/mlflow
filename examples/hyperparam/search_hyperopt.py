@@ -13,8 +13,7 @@ This example currently does not support parallel execution.
 
 import click
 import numpy as np
-
-from hyperopt import fmin, hp, tpe, rand
+from hyperopt import fmin, hp, rand, tpe
 
 import mlflow.projects
 from mlflow.tracking import MlflowClient
@@ -38,19 +37,24 @@ def train(training_data, max_runs, epochs, metric, algo, seed):
     # create random file to store run ids of the training tasks
     tracking_client = MlflowClient()
 
-    def new_eval(
+    def new_eval(  # noqa: D417
         nepochs, experiment_id, null_train_loss, null_valid_loss, null_test_loss, return_all=False
     ):
         """
         Create a new eval function
 
-        :param nepochs: Number of epochs to train the model.
-        :experiment_id: Experiment id for the training run
-        :valid_null_loss: Loss of a null model on the validation dataset
-        :test_null_loss: Loss of a null model on the test dataset.
-        :return_test_loss: Return both validation and test loss if set.
+        Args:
+            nepochs: Number of epochs to train the model.
+            experiment_id: Experiment id for the training run.
+            null_train_loss: Loss of a null model on the training dataset.
+            null_valid_loss: Loss of a null model on the validation dataset.
+            null_test_loss Loss of a null model on the test dataset.
+            return_all: If True, return train, validation, and test loss.
+                Otherwise, return only the validation loss.
+                Default is False.
 
-        :return: new eval function.
+        Returns:
+            An evaluation function that trains the model and logs metrics to MLflow.
         """
 
         def eval(params):
@@ -61,9 +65,12 @@ def train(training_data, max_runs, epochs, metric, algo, seed):
             the best run and to log the runUuids of the child runs as an artifact. This is a
             temporary workaround until MLflow offers better mechanism of linking runs together.
 
-            :param params: Parameters to the train_keras script we optimize over:
-                          learning_rate, drop_out_1
-            :return: The metric value evaluated on the validation data.
+            Args:
+                params: Parameters to the train_keras script we optimize over:
+                    learning_rate, drop_out_1
+
+            Returns:
+                The metric value evaluated on the validation data.
             """
             import mlflow.tracking
 
@@ -90,9 +97,9 @@ def train(training_data, max_runs, epochs, metric, algo, seed):
                 training_run = tracking_client.get_run(p.run_id)
                 metrics = training_run.data.metrics
                 # cap the loss at the loss of the null model
-                train_loss = min(null_train_loss, metrics["train_{}".format(metric)])
-                valid_loss = min(null_valid_loss, metrics["val_{}".format(metric)])
-                test_loss = min(null_test_loss, metrics["test_{}".format(metric)])
+                train_loss = min(null_train_loss, metrics[f"train_{metric}"])
+                valid_loss = min(null_valid_loss, metrics[f"val_{metric}"])
+                test_loss = min(null_test_loss, metrics[f"test_{metric}"])
             else:
                 # run failed => return null loss
                 tracking_client.set_terminated(p.run_id, "FAILED")
@@ -102,9 +109,9 @@ def train(training_data, max_runs, epochs, metric, algo, seed):
 
             mlflow.log_metrics(
                 {
-                    "train_{}".format(metric): train_loss,
-                    "val_{}".format(metric): valid_loss,
-                    "test_{}".format(metric): test_loss,
+                    f"train_{metric}": train_loss,
+                    f"val_{metric}": valid_loss,
+                    f"test_{metric}": test_loss,
                 }
             )
 
@@ -136,7 +143,7 @@ def train(training_data, max_runs, epochs, metric, algo, seed):
         # find the best run, log its metrics as the final metrics of this run.
         client = MlflowClient()
         runs = client.search_runs(
-            [experiment_id], "tags.mlflow.parentRunId = '{run_id}' ".format(run_id=run.info.run_id)
+            [experiment_id], f"tags.mlflow.parentRunId = '{run.info.run_id}' "
         )
         best_val_train = _inf
         best_val_valid = _inf
@@ -151,9 +158,9 @@ def train(training_data, max_runs, epochs, metric, algo, seed):
         mlflow.set_tag("best_run", best_run.info.run_id)
         mlflow.log_metrics(
             {
-                "train_{}".format(metric): best_val_train,
-                "val_{}".format(metric): best_val_valid,
-                "test_{}".format(metric): best_val_test,
+                f"train_{metric}": best_val_train,
+                f"val_{metric}": best_val_valid,
+                f"test_{metric}": best_val_test,
             }
         )
 

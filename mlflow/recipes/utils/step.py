@@ -1,16 +1,20 @@
 import logging
 import os
+import shutil
+import subprocess
+from typing import Iterable, Optional
+
 import numpy as np
 import pandas as pd
-from mlflow.recipes.cards import pandas_renderer
 
-from mlflow.exceptions import MlflowException, BAD_REQUEST, INVALID_PARAMETER_VALUE
+from mlflow.exceptions import BAD_REQUEST, INVALID_PARAMETER_VALUE, MlflowException
+from mlflow.recipes.cards import pandas_renderer
 from mlflow.utils.databricks_utils import (
-    is_running_in_ipython_environment,
+    get_databricks_runtime_version,
     is_in_databricks_runtime,
-    get_databricks_runtime,
+    is_running_in_ipython_environment,
 )
-from typing import Dict, List, Iterable, Tuple
+from mlflow.utils.os import is_windows
 
 _logger = logging.getLogger(__name__)
 
@@ -19,16 +23,22 @@ _MAX_PROFILE_ROW_SIZE = 1000000  # 1M Rows
 _MAX_PROFILE_COL_SIZE = 10000  # 10k Cols
 
 
-def get_merged_eval_metrics(eval_metrics: Dict[str, Dict], ordered_metric_names: List[str] = None):
-    """Returns a merged Pandas DataFrame from a map of dataset to evaluation metrics.
+def get_merged_eval_metrics(
+    eval_metrics: dict[str, dict], ordered_metric_names: Optional[list[str]] = None
+):
+    """
+    Returns a merged Pandas DataFrame from a map of dataset to evaluation metrics.
     Optionally, the rows in the DataFrame are ordered by input ordered metric names.
 
-    :param eval_metrics: Dict maps from dataset name to a Dict of evaluation metrics, which itself
-                         is a map from metric name to metric value.
-    :param ordered_metric_names: List containing metric names. The ordering of the output is
-                                 determined by this list, if provided.
-    :return: Pandas DataFrame containing evaluation metrics. The DataFrame is indexed by metric
-             name. Columns are dataset names.
+    Args:
+        eval_metrics: Dict maps from dataset name to a Dict of evaluation metrics, which itself
+            is a map from metric name to metric value.
+        ordered_metric_names: List containing metric names. The ordering of the output is
+            determined by this list, if provided.
+
+    Returns:
+        Pandas DataFrame containing evaluation metrics. The DataFrame is indexed by metric
+        name. Columns are dataset names.
     """
     from pandas import DataFrame
 
@@ -56,7 +66,7 @@ def get_merged_eval_metrics(eval_metrics: Dict[str, Dict], ordered_metric_names:
     return DataFrame.from_dict(merged_metrics).reindex(ordered_metric_names)
 
 
-def display_html(html_data: str = None, html_file_path: str = None) -> None:
+def display_html(html_data: Optional[str] = None, html_file_path: Optional[str] = None) -> None:
     if html_file_path is None and html_data is None:
         raise MlflowException(
             "At least one HTML source must be provided. html_data and html_file_path are empty.",
@@ -64,13 +74,13 @@ def display_html(html_data: str = None, html_file_path: str = None) -> None:
         )
 
     if is_running_in_ipython_environment():
-        from IPython.display import display as ip_display, HTML
+        from IPython.display import HTML
+        from IPython.display import display as ip_display
 
         html_file_path = html_file_path if html_data is None else None
 
         if is_in_databricks_runtime():
-            dbr_version_image_key = get_databricks_runtime()
-            dbr_version = dbr_version_image_key.split("-")[0]
+            dbr_version = get_databricks_runtime_version()
             if int(dbr_version.split(".")[0]) < 11:
                 raise MlflowException(
                     f"Use Databricks Runtime 11 or newer with MLflow Recipes. "
@@ -81,15 +91,12 @@ def display_html(html_data: str = None, html_file_path: str = None) -> None:
             import IPython.core.display as icd
 
             orig_display = icd.display
-            icd.display = display  # pylint: disable=undefined-variable
+            icd.display = display  # noqa: F821
             ip_display(HTML(data=html_data, filename=html_file_path))
             icd.display = orig_display
         else:
             ip_display(HTML(data=html_data, filename=html_file_path))
     else:
-        import shutil
-        import subprocess
-
         # Use xdg-open in Linux environment
         if shutil.which("xdg-open") is not None:
             open_tool = shutil.which("xdg-open")
@@ -98,7 +105,14 @@ def display_html(html_data: str = None, html_file_path: str = None) -> None:
         else:
             open_tool = None
 
-        if os.path.exists(html_file_path) and open_tool is not None:
+        if (
+            os.path.exists(html_file_path)
+            and open_tool is not None
+            # On Windows, attempting to clean up the card while it's being accessed by
+            # the process running `open_tool` results in a PermissionError. To avoid this,
+            # skip displaying the card.
+            and "GITHUB_ACTIONS" not in os.environ
+        ):
             _logger.info(f"Opening HTML file at: '{html_file_path}'")
             try:
                 subprocess.run([open_tool, html_file_path], check=True)
@@ -113,28 +127,35 @@ def display_html(html_data: str = None, html_file_path: str = None) -> None:
 # multiprocessing and pytest don't play well together on Windows.
 # Relevant code: https://github.com/ydataai/pandas-profiling/blob/f8bad5dde27e3f87f11ac74fb8966c034bc22db8/src/pandas_profiling/model/pandas/summary_pandas.py#L76-L97
 def _get_pool_size():
-    return 1 if "PYTEST_CURRENT_TEST" in os.environ and os.name == "nt" else 0
+    return 1 if "PYTEST_CURRENT_TEST" in os.environ and is_windows() else 0
 
 
-def get_pandas_data_profiles(inputs: Iterable[Tuple[str, pd.DataFrame]]) -> str:
+def get_pandas_data_profiles(inputs: Iterable[tuple[str, pd.DataFrame]]) -> str:
     """
     Returns a data profiling string over input data frame.
 
-    :param inputs: Either a single "glimpse" DataFrame that contains the statistics, or a
-    collection of (title, DataFrame) pairs where each pair names a separate "glimpse"
-    and they are all visualized in comparison mode.
-    :return: a data profiling string such as Pandas profiling ProfileReport.
+    Args:
+        inputs: Either a single "glimpse" DataFrame that contains the statistics, or a
+            collection of (title, DataFrame) pairs where each pair names a separate "glimpse"
+            and they are all visualized in comparison mode.
+
+    Returns:
+        a data profiling string such as Pandas profiling ProfileReport.
     """
     truncated_input = [truncate_pandas_data_profile(*input) for input in inputs]
     return pandas_renderer.get_html(truncated_input)
 
 
 def truncate_pandas_data_profile(title: str, data_frame) -> str:
-    """Returns a data profiling string over input data frame.
+    """
+    Returns a data profiling string over input data frame.
 
-    :param title: String, the title of the data profile.
-    :param data_frame: DataFrame, contains data to be profiled.
-    :return: a data profiling string such as Pandas profiling ProfileReport.
+    Args:
+        title: The title of the data profile.
+        data_frame: Contains data to be profiled.
+
+    Returns:
+        A data profiling string such as Pandas profiling ProfileReport.
     """
     if len(data_frame) == 0:
         return (title, data_frame)
@@ -160,15 +181,15 @@ def truncate_pandas_data_profile(title: str, data_frame) -> str:
     return (title, truncated_df)
 
 
-def validate_classification_config(
+def validate_classification_config(  # noqa: D417
     task: str, positive_class: str, input_df: pd.DataFrame, target_col: str
 ):
     """
-
-    :param task:
-    :param positive_class:
-    :param input_df:
-    :param target_col:
+    Args:
+        task:
+        positive_class:
+        input_df:
+        target_col:
     """
     if task == "classification":
         classes = np.unique(input_df[target_col])

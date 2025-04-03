@@ -6,6 +6,11 @@ on:
       - "dev/dev-env-setup.sh"
       - "dev/test-dev-env-setup.sh"
       - ".github/workflows/dev-setup.yml"
+  pull_request:
+    paths:
+      - "dev/dev-env-setup.sh"
+      - "dev/test-dev-env-setup.sh"
+      - ".github/workflows/dev-setup.yml"
   schedule:
     - cron: "42 7 * * 0"
   workflow_dispatch:
@@ -25,7 +30,7 @@ on:
         default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -35,12 +40,15 @@ defaults:
 jobs:
   linux-env-setup:
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.repository == 'mlflow/mlflow'
+    timeout-minutes: 30
+    permissions: {}
+    if: github.event_name != 'schedule' || github.repository == 'mlflow-automation/mlflow'
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/free-disk-space
         with:
           submodules: recursive
-          repository: ${{ github.event.inputs.repository }}
+          repository: ${{ github.event_name == 'schedule' && 'mlflow/mlflow' || github.event.inputs.repository }}
           ref: ${{ github.event.inputs.ref }}
       - name: Setup environment
         run: |

@@ -2,24 +2,49 @@
 # Required for testing utilities for parsing pip requirements
 pip>=20.1
 ## Test-only dependencies
-pytest
+pytest==8.1.1
+pytest-asyncio
+pytest-repeat
 pytest-cov
+pytest-timeout
 pytest-localserver==0.5.0
-moto!=2.0.7
+moto>=4.2.0,<5,!=4.2.5
 azure-storage-blob>=12.0.0
+azure-storage-file-datalake>=12.9.1
 azure-identity>=1.6.1
-databricks-cli@git+https://github.com/databricks/databricks-cli.git
 pillow
-shap>=0.40
 plotly
 kaleido
-# Required by mlflow.tensorflow / mlflow.pytorch tests.
-transformers
-tensorboard
 # Required by tuning tests
 hyperopt
 # Required by recipes tests
 ipython
 # Required by automl tests
-# 1.1.0 contains this issue: https://github.com/microsoft/FLAML/issues/871
-flaml!=1.1.0
+flaml[automl]
+# Required by evaluator tests
+shap
+# Required to evaluate language models in `mlflow.evaluate`
+evaluate
+nltk
+rouge_score
+textstat
+tiktoken
+# Required by progress bar tests
+ipywidgets
+tqdm
+# Required for LLM eval in `mlflow.evaluate`
+openai
+# Required for showing pytest stats
+psutil
+# SQLAlchemy == 2.0.25 requires typing_extensions >= 4.6.0
+typing_extensions>=4.6.0
+# Required for importing boto3 ClientError directly for testing
+botocore>=1.34
+pyspark
+# Required for testing the opentelemetry exporter of tracing
+opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-exporter-otlp-proto-http
+# TODO: remove this once XGBoost releases >2.1.3
+scikit-learn<1.6
+# Required for testing mlflow.server.auth
+Flask-WTF<2

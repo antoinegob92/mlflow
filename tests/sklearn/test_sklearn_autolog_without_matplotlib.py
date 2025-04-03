@@ -1,16 +1,18 @@
+from unittest import mock
+
 import pytest
 from sklearn.datasets import load_breast_cancer
 from sklearn.ensemble import RandomForestClassifier
-from unittest import mock
 
 import mlflow
 from mlflow import MlflowClient
+
 from tests.helper_functions import AnyStringWith
 
 
 def is_matplotlib_installed():
     try:
-        import matplotlib  # pylint: disable=unused-import
+        import matplotlib  # noqa: F401
 
         return True
     except ImportError:
@@ -24,9 +26,10 @@ def test_sklearn_autolog_works_without_matplotlib():
     mlflow.sklearn.autolog()
     model = RandomForestClassifier(max_depth=2, random_state=0, n_estimators=10)
     X, y = load_breast_cancer(return_X_y=True)
-    with mlflow.start_run() as run, mock.patch(
-        "mlflow.sklearn.utils._logger.warning"
-    ) as mock_warning:
+    with (
+        mlflow.start_run() as run,
+        mock.patch("mlflow.sklearn.utils._logger.warning") as mock_warning,
+    ):
         model.fit(X, y)
         mock_warning.assert_called_once_with(AnyStringWith("Failed to import matplotlib"))
 

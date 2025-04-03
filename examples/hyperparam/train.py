@@ -6,29 +6,28 @@ Validation data is used to select the best hyperparameters, test set performance
 at epochs which improved performance on the validation dataset. The model with best validation set
 performance is logged with MLflow.
 """
-import warnings
 
 import math
-
-from tensorflow import keras
-import numpy as np
-import pandas as pd
+import warnings
 
 import click
-
-from tensorflow.keras.callbacks import Callback
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Lambda
-from tensorflow.keras.optimizers import SGD
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import numpy as np
+import pandas as pd
+from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
+from tensorflow import keras
+from tensorflow.keras.callbacks import Callback
+from tensorflow.keras.layers import Dense, Lambda
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.optimizers import SGD
 
 import mlflow
+from mlflow.models import infer_signature
 
 
 def eval_and_log_metrics(prefix, actual, pred, epoch):
     rmse = np.sqrt(mean_squared_error(actual, pred))
-    mlflow.log_metric("{}_rmse".format(prefix), rmse, step=epoch)
+    mlflow.log_metric(f"{prefix}_rmse", rmse, step=epoch)
     return rmse
 
 
@@ -38,7 +37,7 @@ def get_standardize_f(train):
     return lambda x: (x - mu) / std
 
 
-class MLflowCheckpoint(Callback):
+class MlflowCheckpoint(Callback):
     """
     Example of Keras MLflow logger.
     Logs training metrics and final model with MLflow.
@@ -52,9 +51,9 @@ class MLflowCheckpoint(Callback):
     def __init__(self, test_x, test_y, loss="rmse"):
         self._test_x = test_x
         self._test_y = test_y
-        self.train_loss = "train_{}".format(loss)
-        self.val_loss = "val_{}".format(loss)
-        self.test_loss = "test_{}".format(loss)
+        self.train_loss = f"train_{loss}"
+        self.val_loss = f"val_{loss}"
+        self.test_loss = f"test_{loss}"
         self._best_train_loss = math.inf
         self._best_val_loss = math.inf
         self._best_model = None
@@ -71,7 +70,9 @@ class MLflowCheckpoint(Callback):
             raise Exception("Failed to build any model")
         mlflow.log_metric(self.train_loss, self._best_train_loss, step=self._next_step)
         mlflow.log_metric(self.val_loss, self._best_val_loss, step=self._next_step)
-        mlflow.tensorflow.log_model(self._best_model, "model")
+        predictions = self._best_model.predict(self._test_x)
+        signature = infer_signature(self._test_x, predictions)
+        mlflow.tensorflow.log_model(self._best_model, "model", signature=signature)
 
     def on_epoch_end(self, epoch, logs=None):
         """
@@ -97,8 +98,8 @@ class MLflowCheckpoint(Callback):
 
 
 @click.command(
-    help="Trains an Keras model on wine-quality dataset."
-    "The input is expected in csv format."
+    help="Trains an Keras model on wine-quality dataset. "
+    "The input is expected in csv format. "
     "The model and its metrics are logged with mlflow."
 )
 @click.option("--epochs", type=click.INT, default=100, help="Maximum number of epochs to evaluate.")
@@ -133,7 +134,7 @@ def run(training_data, epochs, batch_size, learning_rate, momentum, seed):
             eval_and_log_metrics("val", valid_y, np.ones(len(valid_y)) * np.mean(valid_y), epoch=-1)
             eval_and_log_metrics("test", test_y, np.ones(len(test_y)) * np.mean(test_y), epoch=-1)
         else:
-            with MLflowCheckpoint(test_x, test_y) as mlflow_logger:
+            with MlflowCheckpoint(test_x, test_y) as mlflow_logger:
                 model = Sequential()
                 model.add(Lambda(get_standardize_f(train_x)))
                 model.add(

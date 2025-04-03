@@ -1,12 +1,16 @@
+import logging
 import posixpath
-from unittest import mock
-import pytest
 import time
+from unittest import mock
+
+import pytest
 
 from mlflow.entities import FileInfo
 from mlflow.exceptions import MlflowException
 from mlflow.store.artifact.artifact_repo import ArtifactRepository
 from mlflow.utils.file_utils import TempDir
+
+from tests.utils.test_logging_utils import logger, reset_logging_level  # noqa F401
 
 _MOCK_ERROR = "MOCK ERROR"
 _MODEL_FILE = "modelfile"
@@ -94,6 +98,31 @@ def test_download_artifacts_does_not_infinitely_loop(base_uri, download_arg, lis
         repo.download_artifacts(download_arg)
 
 
+def test_download_artifacts_download_file():
+    with mock.patch.object(ArtifactRepositoryImpl, "list_artifacts", return_value=[]):
+        repo = ArtifactRepositoryImpl(_PARENT_DIR)
+        repo.download_artifacts(_MODEL_FILE)
+
+
+def test_download_artifacts_dst_path_does_not_exist(tmp_path):
+    repo = ArtifactRepositoryImpl(_PARENT_DIR)
+    dst_path = tmp_path.joinpath("does_not_exist")
+    with pytest.raises(
+        MlflowException, match="The destination path for downloaded artifacts does not exist"
+    ):
+        repo.download_artifacts(_MODEL_DIR, dst_path)
+
+
+def test_download_artifacts_dst_path_is_file(tmp_path):
+    repo = ArtifactRepositoryImpl(_PARENT_DIR)
+    dst_path = tmp_path.joinpath("file")
+    dst_path.touch()
+    with pytest.raises(
+        MlflowException, match="The destination path for downloaded artifacts must be a directory"
+    ):
+        repo.download_artifacts(_MODEL_DIR, dst_path)
+
+
 @pytest.mark.parametrize(
     ("base_uri", "download_arg", "list_return_val"),
     [
@@ -179,3 +208,30 @@ def test_download_artifacts_provides_failure_info(base_uri, download_arg, list_r
         err_msg = str(exc.value)
         assert _MODEL_FILE in err_msg
         assert _MOCK_ERROR in err_msg
+
+
+@pytest.mark.parametrize("debug", [True, False])
+def test_download_artifacts_provides_traceback_info(debug, reset_logging_level):
+    if debug:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
+
+    def list_artifacts(path):
+        fullpath = posixpath.join(_PARENT_MODEL_DIR, path)
+        if fullpath.endswith(_MODEL_DIR) or fullpath.endswith(_MODEL_DIR + "/"):
+            return [FileInfo(item, False, _DUMMY_FILE_SIZE) for item in [_MODEL_FILE]]
+        else:
+            return []
+
+    with mock.patch.object(FailureArtifactRepositoryImpl, "list_artifacts") as list_artifacts_mock:
+        list_artifacts_mock.side_effect = list_artifacts
+        repo = FailureArtifactRepositoryImpl(_PARENT_MODEL_DIR)
+        try:
+            repo.download_artifacts("")
+        except MlflowException as exc:
+            err_msg = str(exc.message)
+            if debug:
+                assert "Traceback" in err_msg
+            else:
+                assert "Traceback" not in err_msg

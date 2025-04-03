@@ -1,24 +1,24 @@
 import abc
 import logging
 import os
-
 from pathlib import Path
+from typing import Any, Optional
+
+import pandas as pd
+
 from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 from mlflow.recipes.artifacts import DataframeArtifact
 from mlflow.recipes.cards import BaseCard
-from mlflow.recipes.step import BaseStep
-from mlflow.recipes.step import StepClass
-from mlflow.recipes.utils.step import get_pandas_data_profiles, validate_classification_config
-from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
-from mlflow.utils.file_utils import read_parquet_as_pandas_df
+from mlflow.recipes.step import BaseStep, StepClass
 from mlflow.recipes.steps.ingest.datasets import (
-    ParquetDataset,
-    DeltaTableDataset,
-    SparkSqlDataset,
     CustomDataset,
+    DeltaTableDataset,
+    ParquetDataset,
+    SparkSqlDataset,
 )
-from typing import Dict, Any
-import pandas as pd
+from mlflow.recipes.utils.step import get_pandas_data_profiles, validate_classification_config
+from mlflow.utils.file_utils import read_parquet_as_pandas_df
 
 _logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ class BaseIngestStep(BaseStep, metaclass=abc.ABCMeta):
 
         schema = pd.io.json.build_table_schema(ingested_df, index=False)
 
-        step_card = self._build_step_card(
+        return self._build_step_card(
             ingested_dataset_profile=ingested_dataset_profile,
             ingested_rows=len(ingested_df),
             schema=schema,
@@ -128,31 +128,31 @@ class BaseIngestStep(BaseStep, metaclass=abc.ABCMeta):
             dataset_src_location=getattr(self.dataset, "location", None),
             dataset_sql=getattr(self.dataset, "sql", None),
         )
-        return step_card
 
-    def _build_step_card(
+    def _build_step_card(  # noqa: D417
         self,
         ingested_dataset_profile: str,
         ingested_rows: int,
-        schema: Dict,
+        schema: dict,
         data_preview: pd.DataFrame = None,
-        dataset_src_location: str = None,
-        dataset_sql: str = None,
+        dataset_src_location: Optional[str] = None,
+        dataset_sql: Optional[str] = None,
     ) -> BaseCard:
         """
         Constructs a step card instance corresponding to the current ingest step state.
 
-        :param ingested_dataset_path: The local filesystem path to the ingested parquet dataset
-                                      file.
-        :param dataset_src_location: The source location of the dataset
-                                     (e.g. '/tmp/myfile.parquet', 's3://mybucket/mypath', ...),
-                                     if the dataset is a location-based dataset. Either
-                                     ``dataset_src_location`` or ``dataset_sql`` must be specified.
-        :param dataset_sql: The Spark SQL query string that defines the dataset
-                            (e.g. 'SELECT * FROM my_spark_table'), if the dataset is a Spark SQL
-                            dataset. Either ``dataset_src_location`` or ``dataset_sql`` must be
-                            specified.
-        :return: An BaseCard instance corresponding to the current ingest step state.
+        Args:
+            ingested_dataset_path: The local filesystem path to the ingested parquet dataset file.
+            dataset_src_location: The source location of the dataset (e.g. '/tmp/myfile.parquet',
+                's3://mybucket/mypath', ...), if the dataset is a location-based dataset. Either
+                ``dataset_src_location`` or ``dataset_sql`` must be specified.
+            dataset_sql: The Spark SQL query string that defines the dataset
+                (e.g. 'SELECT * FROM my_spark_table'), if the dataset is a Spark SQL dataset. Either
+                ``dataset_src_location`` or ``dataset_sql`` must be specified.
+
+        Returns:
+            An BaseCard instance corresponding to the current ingest step state.
+
         """
         if dataset_src_location is None and dataset_sql is None:
             raise MlflowException(
@@ -207,12 +207,12 @@ class BaseIngestStep(BaseStep, metaclass=abc.ABCMeta):
 class IngestStep(BaseIngestStep):
     _DATASET_OUTPUT_NAME = "dataset.parquet"
 
-    def __init__(self, step_config: Dict[str, Any], recipe_root: str):
+    def __init__(self, step_config: dict[str, Any], recipe_root: str):
         super().__init__(step_config, recipe_root)
         self.dataset_output_name = IngestStep._DATASET_OUTPUT_NAME
 
     @classmethod
-    def from_recipe_config(cls, recipe_config: Dict[str, Any], recipe_root: str):
+    def from_recipe_config(cls, recipe_config: dict[str, Any], recipe_root: str):
         ingest_config = recipe_config.get("steps", {}).get("ingest", {})
         target_config = {"target_col": recipe_config.get("target_col")}
         if "positive_class" in recipe_config:
@@ -244,12 +244,12 @@ class IngestStep(BaseIngestStep):
 class IngestScoringStep(BaseIngestStep):
     _DATASET_OUTPUT_NAME = "scoring-dataset.parquet"
 
-    def __init__(self, step_config: Dict[str, Any], recipe_root: str):
+    def __init__(self, step_config: dict[str, Any], recipe_root: str):
         super().__init__(step_config, recipe_root)
         self.dataset_output_name = IngestScoringStep._DATASET_OUTPUT_NAME
 
     @classmethod
-    def from_recipe_config(cls, recipe_config: Dict[str, Any], recipe_root: str):
+    def from_recipe_config(cls, recipe_config: dict[str, Any], recipe_root: str):
         step_config = recipe_config.get("steps", {}).get("ingest_scoring", {})
         step_config["recipe"] = recipe_config.get("recipe")
         return cls(

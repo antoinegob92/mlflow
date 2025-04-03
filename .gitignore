@@ -1,8 +1,9 @@
-# Mlflow
+# MLflow
 mlruns/
 mlartifacts/
 outputs/
 mlruns.db
+**/basic_auth.db
 
 # Mac
 .DS_Store
@@ -34,6 +35,10 @@ wheels/
 *.egg
 MANIFEST
 node_modules
+.docusaurus
+*-ipynb.mdx
+docs/src/api_modules.json
+docs/static/api_reference
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -73,6 +78,7 @@ ENV/
 env.bak/
 venv.bak/
 .python-version
+dev-env-setup-progress
 
 # Editor files
 .*project
@@ -103,6 +109,14 @@ travis_wait*.log
 lightning_logs
 
 a.py
+a.ipynb
+a.md
 
 # Log file created by pre-commit hook for black
 .black.log
+
+# Pytest-monitor load testing DB file
+*.pymon
+
+# Ignore a gunicorn config file
+gunicorn.conf.py

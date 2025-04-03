@@ -1,35 +1,38 @@
+import contextlib
 import json
+import logging
 import os
 import re
 import sys
-import logging
+import warnings
+from datetime import timedelta
 
 import click
 from click import UsageError
-from datetime import timedelta
 
 import mlflow.db
-from mlflow.entities import ViewType
-import mlflow.experiments
 import mlflow.deployments.cli
-from mlflow import projects
-from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
+import mlflow.experiments
 import mlflow.runs
 import mlflow.store.artifact.cli
-from mlflow import version
-from mlflow import tracking
-from mlflow.store.tracking import DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH, DEFAULT_ARTIFACTS_URI
+from mlflow import projects, version
+from mlflow.entities import ViewType
+from mlflow.entities.lifecycle_stage import LifecycleStage
+from mlflow.environment_variables import MLFLOW_EXPERIMENT_ID, MLFLOW_EXPERIMENT_NAME
+from mlflow.exceptions import InvalidUrlException, MlflowException
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 from mlflow.store.artifact.artifact_repository_registry import get_artifact_repository
+from mlflow.store.tracking import DEFAULT_ARTIFACTS_URI, DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH
 from mlflow.tracking import _get_store
 from mlflow.utils import cli_args
 from mlflow.utils.logging_utils import eprint
+from mlflow.utils.os import is_windows
+from mlflow.utils.plugins import get_entry_points
 from mlflow.utils.process import ShellCommandException
 from mlflow.utils.server_cli_utils import (
-    resolve_default_artifact_root,
     artifacts_only_config_validation,
+    resolve_default_artifact_root,
 )
-from mlflow.entities.lifecycle_stage import LifecycleStage
-from mlflow.exceptions import MlflowException
 
 _logger = logging.getLogger(__name__)
 
@@ -85,13 +88,13 @@ def cli():
 )
 @click.option(
     "--experiment-name",
-    envvar=tracking._EXPERIMENT_NAME_ENV_VAR,
+    envvar=MLFLOW_EXPERIMENT_NAME.name,
     help="Name of the experiment under which to launch the run. If not "
     "specified, 'experiment-id' option will be used to launch run.",
 )
 @click.option(
     "--experiment-id",
-    envvar=tracking._EXPERIMENT_ID_ENV_VAR,
+    envvar=MLFLOW_EXPERIMENT_ID.name,
     type=click.STRING,
     help="ID of the experiment under which to launch the run.",
 )
@@ -191,7 +194,7 @@ def run(
         try:
             backend_config = json.loads(backend_config)
         except ValueError as e:
-            eprint("Invalid backend config JSON. Parse error: %s" % e)
+            eprint(f"Invalid backend config JSON. Parse error: {e}")
             raise
     if backend == "kubernetes":
         if backend_config is None:
@@ -233,12 +236,12 @@ def _user_args_to_dict(arguments, argument_type="P"):
             value = split[1]
         else:
             eprint(
-                "Invalid format for -%s parameter: '%s'. "
-                "Use -%s name=value." % (argument_type, arg, argument_type)
+                f"Invalid format for -{argument_type} parameter: '{arg}'. "
+                f"Use -{argument_type} name=value."
             )
             sys.exit(1)
         if name in user_dict:
-            eprint("Repeated parameter: '%s'" % name)
+            eprint(f"Repeated parameter: '{name}'")
             sys.exit(1)
         user_dict[name] = value
     return user_dict
@@ -248,8 +251,7 @@ def _validate_server_args(gunicorn_opts=None, workers=None, waitress_opts=None):
     if sys.platform == "win32":
         if gunicorn_opts is not None or workers is not None:
             raise NotImplementedError(
-                "waitress replaces gunicorn on Windows, "
-                "cannot specify --gunicorn-opts or --workers"
+                "waitress replaces gunicorn on Windows, cannot specify --gunicorn-opts or --workers"
             )
     else:
         if waitress_opts is not None:
@@ -259,7 +261,7 @@ def _validate_server_args(gunicorn_opts=None, workers=None, waitress_opts=None):
             )
 
 
-def _validate_static_prefix(ctx, param, value):  # pylint: disable=unused-argument
+def _validate_static_prefix(ctx, param, value):
     """
     Validate that the static_prefix option starts with a "/" and does not end in a "/".
     Conforms to the callback interface of click documented at
@@ -347,6 +349,28 @@ def _validate_static_prefix(ctx, param, value):  # pylint: disable=unused-argume
     "doesn't exist, it will be created. "
     "Activate prometheus exporter to expose metrics on /metrics endpoint.",
 )
+@click.option(
+    "--app-name",
+    default=None,
+    type=click.Choice([e.name for e in get_entry_points("mlflow.app")]),
+    show_default=True,
+    help=(
+        "Application name to be used for the tracking server. "
+        "If not specified, 'mlflow.server:app' will be used."
+    ),
+)
+@click.option(
+    "--dev",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help=(
+        "If enabled, run the server with debug logging and auto-reload. "
+        "Should only be used for development purposes. "
+        "Cannot be used with '--gunicorn-opts'. "
+        "Unsupported on Windows."
+    ),
+)
 def server(
     backend_store_uri,
     registry_store_uri,
@@ -361,6 +385,8 @@ def server(
     gunicorn_opts,
     waitress_opts,
     expose_prometheus,
+    app_name,
+    dev,
 ):
     """
     Run the MLflow tracking server.
@@ -373,6 +399,13 @@ def server(
     from mlflow.server import _run_server
     from mlflow.server.handlers import initialize_backend_stores
 
+    if dev and is_windows():
+        raise click.UsageError("'--dev' is not supported on Windows.")
+
+    if dev and gunicorn_opts:
+        raise click.UsageError("'--dev' and '--gunicorn-opts' cannot be specified together.")
+
+    gunicorn_opts = "--log-level debug --reload" if dev else gunicorn_opts
     _validate_server_args(gunicorn_opts=gunicorn_opts, workers=workers, waitress_opts=waitress_opts)
 
     # Ensure that both backend_store_uri and default_artifact_uri are set correctly.
@@ -410,6 +443,7 @@ def server(
             gunicorn_opts,
             waitress_opts,
             expose_prometheus,
+            app_name,
         )
     except ShellCommandException:
         eprint("Running the mlflow server failed. Please see the logs above for details.")
@@ -421,7 +455,7 @@ def server(
     "--older-than",
     default=None,
     help="Optional. Remove run(s) older than the specified time limit. "
-    "Specify a string in #d#h#m#s format. Float values are also supported."
+    "Specify a string in #d#h#m#s format. Float values are also supported. "
     "For example: --older-than 1d2h3m4s, --older-than 1.2d3h4m5s",
 )
 @click.option(
@@ -433,6 +467,18 @@ def server(
     "(e.g. 'sqlite:///path/to/file.db') or local filesystem URIs "
     "(e.g. 'file:///absolute/path/to/directory'). By default, data will be deleted "
     "from the ./mlruns directory.",
+)
+@click.option(
+    "--artifacts-destination",
+    envvar="MLFLOW_ARTIFACTS_DESTINATION",
+    metavar="URI",
+    default=None,
+    help=(
+        "The base artifact location from which to resolve artifact upload/download/list requests "
+        "(e.g. 's3://my-bucket'). This option only applies when the tracking server is configured "
+        "to stream artifacts and the experiment's artifact root location is http or "
+        "mlflow-artifacts URI. Otherwise, the default artifact location will be used."
+    ),
 )
 @click.option(
     "--run-ids",
@@ -448,15 +494,24 @@ def server(
     "all of their associated runs. If experiment ids are not specified, data is removed for all "
     "experiments in the `deleted` lifecycle stage.",
 )
-def gc(older_than, backend_store_uri, run_ids, experiment_ids):
+def gc(older_than, backend_store_uri, artifacts_destination, run_ids, experiment_ids):
     """
     Permanently delete runs in the `deleted` lifecycle stage from the specified backend store.
     This command deletes all artifacts and metadata associated with the specified runs.
-    """
-    import warnings
-    from mlflow.utils.time_utils import get_current_time_millis
+    If the provided artifact URL is invalid, the artifact deletion will be bypassed,
+    and the gc process will continue.
 
-    backend_store = _get_store(backend_store_uri, None)
+    .. attention::
+
+        If you are running an MLflow tracking server with artifact proxying enabled,
+        you **must** set the ``MLFLOW_TRACKING_URI`` environment variable before running
+        this command. Otherwise, the ``gc`` command will not be able to resolve
+        artifact URIs and will not be able to delete the associated artifacts.
+
+    """
+    from mlflow.utils.time import get_current_time_millis
+
+    backend_store = _get_store(backend_store_uri, artifacts_destination)
     skip_experiments = False
     if not hasattr(backend_store, "_hard_delete_run"):
         raise MlflowException(
@@ -490,10 +545,7 @@ def gc(older_than, backend_store_uri, run_ids, experiment_ids):
         time_delta = int(timedelta(**time_params).total_seconds() * 1000)
 
     deleted_run_ids_older_than = backend_store._get_deleted_runs(older_than=time_delta)
-    if not run_ids:
-        run_ids = deleted_run_ids_older_than
-    else:
-        run_ids = run_ids.split(",")
+    run_ids = run_ids.split(",") if run_ids else deleted_run_ids_older_than
 
     time_threshold = get_current_time_millis() - time_delta
     if not skip_experiments:
@@ -553,8 +605,8 @@ def gc(older_than, backend_store_uri, run_ids, experiment_ids):
         run = backend_store.get_run(run_id)
         if run.info.lifecycle_stage != LifecycleStage.DELETED:
             raise MlflowException(
-                "Run % is not in `deleted` lifecycle stage. Only runs in"
-                " `deleted` lifecycle stage can be deleted." % run_id
+                f"Run {run_id} is not in `deleted` lifecycle stage. Only runs in"
+                " `deleted` lifecycle stage can be deleted."
             )
         # raise MlflowException if run_id is newer than older_than parameter
         if older_than and run_id not in deleted_run_ids_older_than:
@@ -571,14 +623,31 @@ def gc(older_than, backend_store_uri, run_ids, experiment_ids):
                 error_code=INVALID_PARAMETER_VALUE,
             )
         artifact_repo = get_artifact_repository(run.info.artifact_uri)
-        artifact_repo.delete_artifacts()
+        try:
+            artifact_repo.delete_artifacts()
+        except InvalidUrlException as iue:
+            click.echo(
+                click.style(
+                    f"An exception {iue!r} was raised during the deletion of a model artifact",
+                    fg="yellow",
+                )
+            )
+            click.echo(
+                click.style(
+                    f"Unable to resolve the provided artifact URL: '{artifact_repo}'. "
+                    "The gc process will continue and bypass artifact deletion. "
+                    "Please ensure that the artifact exists "
+                    "and consider manually deleting any unused artifacts. ",
+                    fg="yellow",
+                ),
+            )
         backend_store._hard_delete_run(run_id)
-        click.echo("Run with ID %s has been permanently deleted." % str(run_id))
+        click.echo(f"Run with ID {run_id} has been permanently deleted.")
 
     if not skip_experiments:
         for experiment_id in experiment_ids:
             backend_store._hard_delete_experiment(experiment_id)
-            click.echo("Experiment with ID %s has been permanently deleted." % str(experiment_id))
+            click.echo(f"Experiment with ID {experiment_id} has been permanently deleted.")
 
 
 @cli.command(short_help="Prints out useful information for debugging issues with MLflow.")
@@ -604,25 +673,31 @@ cli.add_command(mlflow.db.commands)
 # We are conditional loading these commands since the skinny client does
 # not support them due to the pandas and numpy dependencies of MLflow Models
 try:
-    import mlflow.models.cli  # pylint: disable=unused-import
+    import mlflow.models.cli
 
     cli.add_command(mlflow.models.cli.commands)
-except ImportError as e:
+except ImportError:
     pass
 
 try:
-    import mlflow.recipes.cli  # pylint: disable=unused-import
+    import mlflow.recipes.cli
 
     cli.add_command(mlflow.recipes.cli.commands)
-except ImportError as e:
+except ImportError:
     pass
 
 try:
-    import mlflow.sagemaker.cli  # pylint: disable=unused-import
+    import mlflow.sagemaker.cli
 
     cli.add_command(mlflow.sagemaker.cli.commands)
-except ImportError as e:
+except ImportError:
     pass
+
+
+with contextlib.suppress(ImportError):
+    import mlflow.gateway.cli
+
+    cli.add_command(mlflow.gateway.cli.commands)
 
 
 if __name__ == "__main__":

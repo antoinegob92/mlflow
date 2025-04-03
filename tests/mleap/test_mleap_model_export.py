@@ -2,31 +2,30 @@ import json
 import os
 import sys
 from unittest import mock
-from packaging.version import Version
 
+import mleap.version
 import numpy as np
 import pandas as pd
 import pyspark
+import pytest
+from packaging.version import Version
 from pyspark.ml.pipeline import Pipeline
 from pyspark.ml.wrapper import JavaModel
-import mleap.version
-import pytest
 
 import mlflow
 import mlflow.mleap
 from mlflow.models import Model
-from mlflow.utils.file_utils import TempDir
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
-from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+from mlflow.utils.file_utils import TempDir
+
 from tests.helper_functions import score_model_in_sagemaker_docker_container
 from tests.pyfunc.test_spark import get_spark_session
-
-
-from tests.spark.test_spark_model_export import (  # pylint: disable=unused-import
-    model_path,
-    iris_df,
-    spark_model_iris,
-    spark_custom_env,
+from tests.spark.test_spark_model_export import (
+    assert_register_model_called_with_local_model_path,
+    iris_df,  # noqa: F401
+    model_path,  # noqa: F401
+    spark_custom_env,  # noqa: F401
+    spark_model_iris,  # noqa: F401
 )
 
 
@@ -44,15 +43,14 @@ def get_mleap_jars():
     )
 
 
-@pytest.fixture(scope="module", autouse=True)
-def spark_context():
+@pytest.fixture(scope="module")
+def spark():
     conf = pyspark.SparkConf()
     conf.set(key="spark.jars.packages", value=get_mleap_jars())
     # Exclude `net.sourceforge.f2j` to avoid `java.io.FileNotFoundException`
     conf.set(key="spark.jars.excludes", value="net.sourceforge.f2j:arpack_combined_all")
-    spark_session = get_spark_session(conf)
-    yield spark_session.sparkContext
-    spark_session.stop()
+    with get_spark_session(conf) as spark_session:
+        yield spark_session
 
 
 @pytest.mark.skipif(
@@ -146,20 +144,18 @@ def test_mleap_module_model_save_with_unsupported_transformer_raises_serializati
 
 def test_mleap_model_log(spark_model_iris):
     artifact_path = "model"
-    register_model_patch = mock.patch("mlflow.register_model")
+    register_model_patch = mock.patch("mlflow.tracking._model_registry.fluent._register_model")
     with mlflow.start_run(), register_model_patch:
         model_info = mlflow.spark.log_model(
-            spark_model=spark_model_iris.model,
+            spark_model_iris.model,
+            artifact_path,
             sample_input=spark_model_iris.spark_df,
-            artifact_path=artifact_path,
             registered_model_name="Model1",
         )
-        model_uri = "runs:/{run_id}/{artifact_path}".format(
-            run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-        )
+        model_uri = f"runs:/{mlflow.active_run().info.run_id}/{artifact_path}"
         assert model_info.model_uri == model_uri
-        mlflow.register_model.assert_called_once_with(
-            model_uri, "Model1", await_registration_for=DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+        assert_register_model_called_with_local_model_path(
+            mlflow.tracking._model_registry.fluent._register_model, model_uri, "Model1"
         )
 
     model_path = _download_artifact_from_uri(artifact_uri=model_uri)
@@ -231,9 +227,9 @@ def test_model_log_with_metadata(spark_model_iris):
 
     with mlflow.start_run():
         mlflow.mleap.log_model(
-            spark_model=spark_model_iris.model,
-            artifact_path=artifact_path,
-            sample_input=spark_model_iris.spark_df,
+            spark_model_iris.model,
+            spark_model_iris.spark_df,
+            artifact_path,
             metadata={"metadata_key": "metadata_value"},
         )
         model_uri = mlflow.get_artifact_uri(artifact_path)

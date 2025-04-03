@@ -1,11 +1,14 @@
+from collections import namedtuple
+
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from collections import namedtuple
-from statsmodels.tsa.arima_process import arma_generate_sample
-from statsmodels.tsa.arima.model import ARIMA
 from scipy.linalg import toeplitz
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.arima_process import arma_generate_sample
 
+from mlflow.models import ModelSignature
+from mlflow.types.schema import Schema, TensorSpec
 
 ModelWithResults = namedtuple("ModelWithResults", ["model", "alg", "inference_dataframe"])
 
@@ -31,6 +34,13 @@ def ols_model(**kwargs):
     model = ols.fit(**kwargs)
 
     return ModelWithResults(model=model, alg=ols, inference_dataframe=X)
+
+
+def ols_model_signature():
+    return ModelSignature(
+        inputs=Schema([TensorSpec(np.dtype("float64"), (-1, 3))]),
+        outputs=Schema([TensorSpec(np.dtype("float64"), (-1,))]),
+    )
 
 
 def failing_logit_model():
@@ -101,9 +111,7 @@ def recursivels_model():
     endog = dta.WORLDCONSUMPTION
 
     # To the regressors in the dataset, we add a column of ones for an intercept
-    exog = sm.add_constant(
-        dta[["COPPERPRICE", "INCOMEINDEX", "ALUMPRICE", "INVENTORYINDEX"]]  # pylint: disable=E1136
-    )
+    exog = sm.add_constant(dta[["COPPERPRICE", "INCOMEINDEX", "ALUMPRICE", "INVENTORYINDEX"]])
     rls = sm.RecursiveLS(endog, exog)
     model = rls.fit()
 
@@ -166,7 +174,7 @@ def gee_model():
     y += np.sqrt(resid_var) * np.random.normal(size=n)
 
     # Put everything into a dataframe.
-    df = pd.DataFrame(xmat, columns=["x%d" % j for j in range(p)])
+    df = pd.DataFrame(xmat, columns=[f"x{j}" for j in range(p)])
     df["y"] = y + xmat[:, 0] - xmat[:, 3]
     df["groups_ix"] = groups_ix
     df["level1_ix"] = level1_ix

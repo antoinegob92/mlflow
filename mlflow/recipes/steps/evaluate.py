@@ -1,44 +1,45 @@
+import datetime
 import logging
 import operator
 import os
-from pathlib import Path
-from typing import Dict, Any
+import sys
+import warnings
 from collections import namedtuple
+from pathlib import Path
+from typing import Any
 
 import mlflow
 from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 from mlflow.recipes.cards import BaseCard
-from mlflow.recipes.step import BaseStep
-from mlflow.recipes.step import StepClass
+from mlflow.recipes.step import BaseStep, StepClass
 from mlflow.recipes.steps.train import TrainStep
 from mlflow.recipes.utils.execution import get_step_output_path
 from mlflow.recipes.utils.metrics import (
     _get_builtin_metrics,
     _get_custom_metrics,
-    _get_primary_metric,
-    _get_model_type_from_template,
-    _load_custom_metrics,
     _get_extended_task,
+    _get_model_type_from_template,
+    _get_primary_metric,
+    _load_custom_metrics,
     transform_multiclass_metric,
 )
 from mlflow.recipes.utils.step import get_merged_eval_metrics, validate_classification_config
 from mlflow.recipes.utils.tracking import (
-    get_recipe_tracking_config,
-    apply_recipe_tracking_config,
     TrackingConfig,
+    apply_recipe_tracking_config,
+    get_recipe_tracking_config,
     get_run_tags_env_vars,
 )
-from mlflow.projects.utils import get_databricks_env_vars
-from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 from mlflow.tracking.fluent import _get_experiment_id, _set_experiment_primary_metric
-from mlflow.utils.databricks_utils import get_databricks_run_url
+from mlflow.utils.databricks_utils import get_databricks_env_vars, get_databricks_run_url
 from mlflow.utils.string_utils import strip_prefix
 
 _logger = logging.getLogger(__name__)
 
 
 _FEATURE_IMPORTANCE_PLOT_FILE = "feature_importance.png"
-
+_VALIDATION_METRIC_PREFIX = "val_"
 
 MetricValidationResult = namedtuple(
     "MetricValidationResult", ["metric", "greater_is_better", "value", "threshold", "validated"]
@@ -46,7 +47,7 @@ MetricValidationResult = namedtuple(
 
 
 class EvaluateStep(BaseStep):
-    def __init__(self, step_config: Dict[str, Any], recipe_root: str) -> None:
+    def __init__(self, step_config: dict[str, Any], recipe_root: str) -> None:
         super().__init__(step_config, recipe_root)
         self.tracking_config = TrackingConfig.from_dict(self.step_config)
 
@@ -129,25 +130,22 @@ class EvaluateStep(BaseStep):
 
     def _run(self, output_directory):
         def my_warn(*args, **kwargs):
-            import sys
-            import datetime
-
             timestamp = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
             stacklevel = 1 if "stacklevel" not in kwargs else kwargs["stacklevel"]
             frame = sys._getframe(stacklevel)
             filename = frame.f_code.co_filename
             lineno = frame.f_lineno
             message = f"{timestamp} {filename}:{lineno}: {args[0]}\n"
-            open(os.path.join(output_directory, "warning_logs.txt"), "a").write(message)
-
-        import warnings
+            with open(os.path.join(output_directory, "warning_logs.txt"), "a") as f:
+                f.write(message)
 
         original_warn = warnings.warn
         warnings.warn = my_warn
         try:
             import pandas as pd
 
-            open(os.path.join(output_directory, "warning_logs.txt"), "w")
+            with open(os.path.join(output_directory, "warning_logs.txt"), "w"):
+                pass
 
             self._validate_validation_criteria()
 
@@ -199,7 +197,7 @@ class EvaluateStep(BaseStep):
                         {
                             "explainability_algorithm": "kernel",
                             "explainability_nsamples": 10,
-                            "metric_prefix": "val_",
+                            "metric_prefix": _VALIDATION_METRIC_PREFIX,
                         },
                     ),
                     (
@@ -219,7 +217,7 @@ class EvaluateStep(BaseStep):
                         targets=self.target_col,
                         model_type=_get_model_type_from_template(self.recipe),
                         evaluators="default",
-                        custom_metrics=_load_custom_metrics(
+                        extra_metrics=_load_custom_metrics(
                             self.recipe_root,
                             self.evaluation_metrics.values(),
                         ),
@@ -266,11 +264,12 @@ class EvaluateStep(BaseStep):
         Constructs data profiles of predictions and errors and a step card instance corresponding
         to the current evaluate step state.
 
-        :param run_id: The ID of the MLflow Run to which to log model evaluation results.
-        :param model_uri: The URI of the model being evaluated.
-        :param eval_metrics: the evaluation result keyed by dataset name from `mlflow.evaluate`.
-        :param validation_results: a list of `MetricValidationResult` instances
-        :param output_directory: output directory used by the evaluate step.
+        Args:
+            run_id: The ID of the MLflow Run to which to log model evaluation results.
+            model_uri: The URI of the model being evaluated.
+            eval_metrics: The evaluation result keyed by dataset name from `mlflow.evaluate`.
+            validation_results: A list of `MetricValidationResult` instances.
+            output_directory: Output directory used by the evaluate step.
         """
         import pandas as pd
 
@@ -343,7 +342,7 @@ class EvaluateStep(BaseStep):
             confusion_matrix_path = os.path.join(
                 output_directory,
                 "eval_validation/artifacts",
-                "confusion_matrix.png",
+                f"{_VALIDATION_METRIC_PREFIX}confusion_matrix.png",
             )
             if os.path.exists(confusion_matrix_path):
                 classifiers_plot_tab.add_html(
@@ -357,7 +356,7 @@ class EvaluateStep(BaseStep):
             lift_curve_path = os.path.join(
                 output_directory,
                 "eval_validation/artifacts",
-                "lift_curve_plot.png",
+                f"{_VALIDATION_METRIC_PREFIX}lift_curve_plot.png",
             )
             if os.path.exists(lift_curve_path):
                 classifiers_plot_tab.add_html(
@@ -369,7 +368,7 @@ class EvaluateStep(BaseStep):
             pr_curve_path = os.path.join(
                 output_directory,
                 "eval_validation/artifacts",
-                "precision_recall_curve_plot.png",
+                f"{_VALIDATION_METRIC_PREFIX}precision_recall_curve_plot.png",
             )
             if os.path.exists(pr_curve_path):
                 classifiers_plot_tab.add_html(
@@ -381,7 +380,7 @@ class EvaluateStep(BaseStep):
             roc_curve_path = os.path.join(
                 output_directory,
                 "eval_validation/artifacts",
-                "roc_curve_plot.png",
+                f"{_VALIDATION_METRIC_PREFIX}roc_curve_plot.png",
             )
             if os.path.exists(roc_curve_path):
                 classifiers_plot_tab.add_html(
@@ -391,31 +390,44 @@ class EvaluateStep(BaseStep):
                 classifiers_plot_tab.add_image("ROC_CURVE_PLOT", roc_curve_path, width=400)
 
         # Tab 3: SHAP plots.
-        shap_plot_tab = card.add_tab(
-            "Feature Importance",
-            '<h3 class="section-title">Feature Importance on Validation Dataset</h3>'
-            '<h3 class="section-title">SHAP Bar Plot</h3>{{SHAP_BAR_PLOT}}'
-            '<h3 class="section-title">SHAP Beeswarm Plot</h3>{{SHAP_BEESWARM_PLOT}}',
-        )
+        def _add_shap_plots(card):
+            """Contingent on shap being installed."""
+            shap_plot_tab = card.add_tab(
+                "Feature Importance",
+                '<h3 class="section-title">Feature Importance on Validation Dataset</h3>'
+                '<h3 class="section-title">SHAP Bar Plot</h3>{{SHAP_BAR_PLOT}}'
+                '<h3 class="section-title">SHAP Beeswarm Plot</h3>{{SHAP_BEESWARM_PLOT}}',
+            )
 
-        shap_bar_plot_path = os.path.join(
-            output_directory, "eval_validation/artifacts", "shap_feature_importance_plot.png"
-        )
-        shap_beeswarm_plot_path = os.path.join(
-            output_directory,
-            "eval_validation/artifacts",
-            "shap_beeswarm_plot.png",
-        )
-        shap_plot_tab.add_image("SHAP_BAR_PLOT", shap_bar_plot_path, width=800)
-        shap_plot_tab.add_image("SHAP_BEESWARM_PLOT", shap_beeswarm_plot_path, width=800)
+            shap_bar_plot_path = os.path.join(
+                output_directory,
+                "eval_validation/artifacts",
+                f"{_VALIDATION_METRIC_PREFIX}shap_feature_importance_plot.png",
+            )
+            shap_beeswarm_plot_path = os.path.join(
+                output_directory,
+                "eval_validation/artifacts",
+                f"{_VALIDATION_METRIC_PREFIX}shap_beeswarm_plot.png",
+            )
+            shap_plot_tab.add_image("SHAP_BAR_PLOT", shap_bar_plot_path, width=800)
+            shap_plot_tab.add_image("SHAP_BEESWARM_PLOT", shap_beeswarm_plot_path, width=800)
+
+        try:
+            import shap  # noqa: F401
+            from matplotlib import pyplot  # noqa: F401
+
+            _add_shap_plots(card)
+        except ImportError:
+            _logger.warning(
+                "SHAP or matplotlib package is not installed, so shap plots will not be added."
+            )
 
         # Tab 3: Warning log outputs.
         warning_output_path = os.path.join(output_directory, "warning_logs.txt")
         if os.path.exists(warning_output_path):
             warnings_output_tab = card.add_tab("Warning Logs", "{{ STEP_WARNINGS }}")
-            warnings_output_tab.add_html(
-                "STEP_WARNINGS", f"<pre>{open(warning_output_path).read()}</pre>"
-            )
+            with open(warning_output_path) as f:
+                warnings_output_tab.add_html("STEP_WARNINGS", f"<pre>{f.read()}</pre>")
 
         # Tab 4: Run summary.
         run_summary_card_tab = card.add_tab(

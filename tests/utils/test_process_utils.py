@@ -1,8 +1,10 @@
-import pytest
+import os
 import uuid
 
+import pytest
+
+from mlflow.utils.os import is_windows
 from mlflow.utils.process import cache_return_value_per_process
-import os
 
 
 @cache_return_value_per_process
@@ -35,7 +37,7 @@ def test_cache_return_value_per_process():
 
     with pytest.raises(
         ValueError,
-        match="The function decorated by `cache_return_value_per_process` is not allowed to be"
+        match="The function decorated by `cache_return_value_per_process` is not allowed to be "
         "called with key-word style arguments.",
     ):
         _gen_random_str1(v=True)
@@ -46,7 +48,7 @@ def test_cache_return_value_per_process():
     assert len({path1, path3, f2_path1, f2_path2}) == 4
 
     # Skip the following block on Windows which doesn't support `os.fork`
-    if os.name != "nt":
+    if not is_windows():
         # Use `os.fork()` to make parent and child processes share the same global variable
         # `_per_process_value_cache_map`.
         pid = os.fork()

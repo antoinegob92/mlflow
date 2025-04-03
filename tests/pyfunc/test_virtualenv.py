@@ -2,24 +2,24 @@ import os
 import sys
 from collections import namedtuple
 from io import BytesIO
-from pathlib import Path
-from stat import S_IRUSR, S_IRGRP, S_IROTH, S_IXUSR, S_IXGRP, S_IXOTH
+from stat import S_IRGRP, S_IROTH, S_IRUSR, S_IXGRP, S_IXOTH, S_IXUSR
 
-import pytest
 import numpy as np
 import pandas as pd
+import pytest
 import sklearn
-from sklearn.linear_model import LogisticRegression
 from sklearn.datasets import load_iris
+from sklearn.linear_model import LogisticRegression
 
 import mlflow
+from mlflow.environment_variables import MLFLOW_ENV_ROOT
 from mlflow.pyfunc.scoring_server import CONTENT_TYPE_JSON
 from mlflow.utils.environment import _PYTHON_ENV_FILE_NAME, _REQUIREMENTS_FILE_NAME
 from mlflow.utils.virtualenv import (
-    _MLFLOW_ENV_ROOT_ENV_VAR,
     _is_pyenv_available,
     _is_virtualenv_available,
 )
+
 from tests.helper_functions import pyfunc_serve_and_score_model
 
 pytestmark = pytest.mark.skipif(
@@ -54,7 +54,7 @@ def serve_and_score(model_uri, data, extra_args=None):
 def temp_mlflow_env_root(tmp_path, monkeypatch):
     env_root = tmp_path / "envs"
     env_root.mkdir(exist_ok=True)
-    monkeypatch.setenv(_MLFLOW_ENV_ROOT_ENV_VAR, str(env_root))
+    monkeypatch.setenv(MLFLOW_ENV_ROOT.name, str(env_root))
     return env_root
 
 
@@ -64,7 +64,7 @@ use_temp_mlflow_env_root = pytest.mark.usefixtures(temp_mlflow_env_root.__name__
 @use_temp_mlflow_env_root
 def test_restore_environment_with_virtualenv(sklearn_model):
     with mlflow.start_run():
-        model_info = mlflow.sklearn.log_model(sklearn_model.model, artifact_path="model")
+        model_info = mlflow.sklearn.log_model(sklearn_model.model, "model")
 
     scores = serve_and_score(model_info.model_uri, sklearn_model.X_pred)
     np.testing.assert_array_almost_equal(scores, sklearn_model.y_pred)
@@ -97,7 +97,7 @@ def test_serve_and_score_1x_models():
 @use_temp_mlflow_env_root
 def test_reuse_environment(temp_mlflow_env_root, sklearn_model):
     with mlflow.start_run():
-        model_info = mlflow.sklearn.log_model(sklearn_model.model, artifact_path="model")
+        model_info = mlflow.sklearn.log_model(sklearn_model.model, "model")
 
     # Serve the model
     scores = serve_and_score(model_info.model_uri, sklearn_model.X_pred)
@@ -114,7 +114,7 @@ def test_differenet_requirements_create_different_environments(temp_mlflow_env_r
     with mlflow.start_run():
         model_info1 = mlflow.sklearn.log_model(
             sklearn_model.model,
-            artifact_path="model",
+            "model",
             pip_requirements=[sklearn_req],
         )
     scores = serve_and_score(model_info1.model_uri, sklearn_model.X_pred)
@@ -124,7 +124,7 @@ def test_differenet_requirements_create_different_environments(temp_mlflow_env_r
     with mlflow.start_run():
         model_info2 = mlflow.sklearn.log_model(
             sklearn_model.model,
-            artifact_path="model",
+            "model",
             pip_requirements=[sklearn_req, "numpy"],
         )
     scores = serve_and_score(model_info2.model_uri, sklearn_model.X_pred)
@@ -135,25 +135,53 @@ def test_differenet_requirements_create_different_environments(temp_mlflow_env_r
 
 
 @use_temp_mlflow_env_root
-def test_python_env_file_does_not_exist(sklearn_model):
+def test_environment_directory_is_cleaned_up_when_unexpected_error_occurs(
+    temp_mlflow_env_root, sklearn_model
+):
+    sklearn_req = "scikit-learn==999.999.999"
     with mlflow.start_run():
-        model_info = mlflow.sklearn.log_model(sklearn_model.model, artifact_path="model")
-        model_artifact_path = Path(mlflow.get_artifact_uri("model").replace("file://", ""))
+        model_info1 = mlflow.sklearn.log_model(
+            sklearn_model.model,
+            "model",
+            pip_requirements=[sklearn_req],
+        )
 
-    model_artifact_path.joinpath(_PYTHON_ENV_FILE_NAME).unlink()
-    scores = serve_and_score(model_info.model_uri, sklearn_model.X_pred)
+    try:
+        serve_and_score(model_info1.model_uri, sklearn_model.X_pred)
+    except Exception:
+        pass
+    else:
+        assert False, "Should have raised an exception"
+    assert len(list(temp_mlflow_env_root.iterdir())) == 0
+
+
+@use_temp_mlflow_env_root
+def test_python_env_file_does_not_exist(sklearn_model, tmp_path):
+    with mlflow.start_run():
+        model_info = mlflow.sklearn.log_model(sklearn_model.model, "model")
+
+    mlflow.artifacts.download_artifacts(artifact_uri=model_info.model_uri, dst_path=tmp_path)
+    tmp_path = tmp_path / "model"
+    python_env = next(tmp_path.rglob(_PYTHON_ENV_FILE_NAME))
+    python_env.unlink()
+
+    scores = serve_and_score(tmp_path, sklearn_model.X_pred)
     np.testing.assert_array_almost_equal(scores, sklearn_model.y_pred)
 
 
 @use_temp_mlflow_env_root
-def test_python_env_file_and_requirements_file_do_not_exist(sklearn_model):
+def test_python_env_file_and_requirements_file_do_not_exist(sklearn_model, tmp_path):
     with mlflow.start_run():
-        model_info = mlflow.sklearn.log_model(sklearn_model.model, artifact_path="model")
-        model_artifact_path = Path(mlflow.get_artifact_uri("model").replace("file://", ""))
+        model_info = mlflow.sklearn.log_model(sklearn_model.model, "model")
 
-    model_artifact_path.joinpath(_PYTHON_ENV_FILE_NAME).unlink()
-    model_artifact_path.joinpath(_REQUIREMENTS_FILE_NAME).unlink()
-    scores = serve_and_score(model_info.model_uri, sklearn_model.X_pred)
+    mlflow.artifacts.download_artifacts(artifact_uri=model_info.model_uri, dst_path=tmp_path)
+    tmp_path = tmp_path / "model"
+    python_env = next(tmp_path.rglob(_PYTHON_ENV_FILE_NAME))
+    python_env.unlink()
+    requirements = next(tmp_path.rglob(_REQUIREMENTS_FILE_NAME))
+    requirements.unlink()
+
+    scores = serve_and_score(tmp_path, sklearn_model.X_pred)
     np.testing.assert_array_almost_equal(scores, sklearn_model.y_pred)
 
 
@@ -163,7 +191,7 @@ def test_environment_is_removed_when_package_installation_fails(
     with mlflow.start_run():
         model_info = mlflow.sklearn.log_model(
             sklearn_model.model,
-            artifact_path="model",
+            "model",
             # Enforce pip install to fail using a non-existent package version
             pip_requirements=["mlflow==999.999.999"],
         )
@@ -173,7 +201,7 @@ def test_environment_is_removed_when_package_installation_fails(
 
 
 @use_temp_mlflow_env_root
-def test_restore_environment_from_conda_yaml_containing_conda_packages(sklearn_model):
+def test_restore_environment_from_conda_yaml_containing_conda_packages(sklearn_model, tmp_path):
     conda_env = {
         "name": "mlflow-env",
         "channels": ["conda-forge"],
@@ -192,9 +220,12 @@ def test_restore_environment_from_conda_yaml_containing_conda_packages(sklearn_m
     with mlflow.start_run():
         model_info = mlflow.sklearn.log_model(
             sklearn_model.model,
-            artifact_path="model",
+            "model",
             conda_env=conda_env,
         )
-        model_artifact_path = Path(mlflow.get_artifact_uri("model").replace("file://", ""))
-    model_artifact_path.joinpath(_PYTHON_ENV_FILE_NAME).unlink()
-    serve_and_score(model_info.model_uri, sklearn_model.X_pred)
+
+    mlflow.artifacts.download_artifacts(artifact_uri=model_info.model_uri, dst_path=tmp_path)
+    tmp_path = tmp_path / "model"
+    python_env = next(tmp_path.rglob(_PYTHON_ENV_FILE_NAME))
+    python_env.unlink()
+    serve_and_score(tmp_path, sklearn_model.X_pred)

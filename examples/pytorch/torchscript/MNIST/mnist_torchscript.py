@@ -1,11 +1,8 @@
-# pylint: disable=abstract-method
-
 import argparse
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
+from torch import nn, optim
 from torch.optim.lr_scheduler import StepLR
 from torchvision import datasets, transforms
 
@@ -35,8 +32,8 @@ class Net(nn.Module):
         x = F.relu(x)
         x = self.dropout2(x)
         x = self.fc2(x)
-        output = F.log_softmax(x, dim=1)
-        return output
+        x = F.log_softmax(x, dim=1)
+        return x
 
 
 def train(args, model, device, train_loader, optimizer, epoch):
@@ -179,7 +176,7 @@ def main():
         train(args, scripted_model, device, train_loader, optimizer, epoch)
         scheduler.step()
     test(scripted_model, device, test_loader)
-    with mlflow.start_run() as run:
+    with mlflow.start_run():
         mlflow.pytorch.log_model(scripted_model, "model")  # logging scripted model
         model_path = mlflow.get_artifact_uri("model")
         loaded_pytorch_model = mlflow.pytorch.load_model(model_path)  # loading scripted model
@@ -189,9 +186,7 @@ def main():
             prediction = loaded_pytorch_model(test_datapoint[0].unsqueeze(0).to(device))
             actual = test_target[0].item()
             predicted = torch.argmax(prediction).item()
-            print(
-                "\nPREDICTION RESULT: ACTUAL: {}, PREDICTED: {}".format(str(actual), str(predicted))
-            )
+            print(f"\nPREDICTION RESULT: ACTUAL: {actual!s}, PREDICTED: {predicted!s}")
 
 
 if __name__ == "__main__":

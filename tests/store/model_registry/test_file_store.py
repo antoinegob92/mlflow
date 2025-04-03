@@ -1,16 +1,26 @@
 import time
 import uuid
+from typing import NamedTuple
 from unittest import mock
-from typing import NamedTuple, List
 
 import pytest
 
-from mlflow.entities.model_registry import ModelVersion, ModelVersionTag, RegisteredModelTag
+from mlflow.entities.model_registry import (
+    ModelVersion,
+    ModelVersionTag,
+    RegisteredModelTag,
+)
+from mlflow.entities.model_registry.prompt import IS_PROMPT_TAG_KEY
 from mlflow.exceptions import MlflowException
-from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, RESOURCE_DOES_NOT_EXIST, ErrorCode
+from mlflow.protos.databricks_pb2 import (
+    INVALID_PARAMETER_VALUE,
+    RESOURCE_DOES_NOT_EXIST,
+    ErrorCode,
+)
 from mlflow.store.model_registry.file_store import FileStore
 from mlflow.utils.file_utils import path_to_local_file_uri, write_yaml
-from mlflow.utils.time_utils import get_current_time_millis
+from mlflow.utils.time import get_current_time_millis
+
 from tests.helper_functions import random_int, random_str
 
 
@@ -49,9 +59,9 @@ def rm_data(registered_model_names, tmp_path):
 
 def test_create_registered_model(store):
     # Error cases
-    with pytest.raises(MlflowException, match=r"Registered model name cannot be empty\."):
+    with pytest.raises(MlflowException, match=r"Missing value for required parameter 'name'\."):
         store.create_registered_model(None)
-    with pytest.raises(MlflowException, match=r"Registered model name cannot be empty\."):
+    with pytest.raises(MlflowException, match=r"Missing value for required parameter 'name'\."):
         store.create_registered_model("")
 
     name = random_str()
@@ -60,6 +70,21 @@ def test_create_registered_model(store):
     assert model.latest_versions == []
     assert model.creation_timestamp == model.last_updated_timestamp
     assert model.tags == {}
+
+
+def test_create_registered_model_with_name_that_looks_like_path(store, tmp_path):
+    name = str(tmp_path.joinpath("test"))
+    with pytest.raises(
+        MlflowException, match=r"Registered model name cannot contain path separator"
+    ):
+        store.get_registered_model(name)
+
+
+def test_create_registered_model_with_percent_in_name(store, tmp_path):
+    with pytest.raises(
+        MlflowException, match=r"Registered model name cannot contain '%' character"
+    ):
+        store.get_registered_model("m%6fdel")
 
 
 def _verify_registered_model(fs, name, rm_data):
@@ -81,6 +106,12 @@ def test_get_registered_model(store, registered_model_names, rm_data):
     with pytest.raises(MlflowException, match=f"Registered Model with name={name} not found"):
         store.get_registered_model(name)
 
+    name = "../../path"
+    with pytest.raises(
+        MlflowException, match="Registered model name cannot contain path separator"
+    ):
+        store.get_registered_model(name)
+
 
 def test_list_registered_model(store, registered_model_names, rm_data):
     for rm in store.list_registered_models(max_results=10, page_token=None):
@@ -89,16 +120,18 @@ def test_list_registered_model(store, registered_model_names, rm_data):
         assert name == rm_data[name]["name"]
 
 
-def test_rename_registered_model(store, registered_model_names, rm_data):
+@pytest.mark.usefixtures(rm_data.__name__)
+def test_rename_registered_model(store, registered_model_names):
     # Error cases
     model_name = registered_model_names[0]
-    with pytest.raises(MlflowException, match=r"Registered model name cannot be empty\."):
+    with pytest.raises(MlflowException, match=r"Missing value for required parameter 'name'\."):
         store.rename_registered_model(model_name, None)
 
     # test that names of existing registered models are checked before renaming
     other_model_name = registered_model_names[1]
     with pytest.raises(
-        MlflowException, match=rf"Registered Model \(name={other_model_name}\) already exists\."
+        MlflowException,
+        match=rf"Registered Model \(name={other_model_name}\) already exists\.",
     ):
         store.rename_registered_model(model_name, other_model_name)
 
@@ -111,7 +144,8 @@ def _extract_names(registered_models):
     return [rm.name for rm in registered_models]
 
 
-def test_delete_registered_model(store, registered_model_names, rm_data):
+@pytest.mark.usefixtures(rm_data.__name__)
+def test_delete_registered_model(store, registered_model_names):
     model_name = registered_model_names[random_int(0, len(registered_model_names) - 1)]
 
     # Error cases
@@ -197,6 +231,7 @@ def _create_model_version(
     run_link=None,
     description=None,
 ):
+    time.sleep(0.001)
     return fs.create_model_version(
         name, source, run_id, tags, run_link=run_link, description=description
     )
@@ -220,18 +255,27 @@ def test_get_latest_versions(store):
     mv2 = _create_model_version(store, name)
     assert mv2.version == 2
     store.transition_model_version_stage(
-        name=mv2.name, version=mv2.version, stage="Production", archive_existing_versions=False
+        name=mv2.name,
+        version=mv2.version,
+        stage="Production",
+        archive_existing_versions=False,
     )
 
     mv3 = _create_model_version(store, name)
     assert mv3.version == 3
     store.transition_model_version_stage(
-        name=mv3.name, version=mv3.version, stage="Production", archive_existing_versions=False
+        name=mv3.name,
+        version=mv3.version,
+        stage="Production",
+        archive_existing_versions=False,
     )
     mv4 = _create_model_version(store, name)
     assert mv4.version == 4
     store.transition_model_version_stage(
-        name=mv4.name, version=mv4.version, stage="Staging", archive_existing_versions=False
+        name=mv4.name,
+        version=mv4.version,
+        stage="Staging",
+        archive_existing_versions=False,
     )
 
     # test that correct latest versions are returned for each stage
@@ -318,7 +362,7 @@ def test_set_registered_model_tag(store):
     long_tag = RegisteredModelTag("longTagKey", "a" * 5001)
     with pytest.raises(
         MlflowException,
-        match=(r"Registered model value '.+' had length \d+, which exceeded length limit of 5000"),
+        match=("'value' exceeds the maximum length of 5000 characters"),
     ) as exception_context:
         store.set_registered_model_tag(name2, long_tag)
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
@@ -326,12 +370,14 @@ def test_set_registered_model_tag(store):
     long_tag = RegisteredModelTag("longTagKey", "a" * 4999)
     store.set_registered_model_tag(name2, long_tag)
     # can not set invalid tag
-    with pytest.raises(MlflowException, match=r"Tag name cannot be None") as exception_context:
+    with pytest.raises(
+        MlflowException, match=r"Missing value for required parameter 'key'"
+    ) as exception_context:
         store.set_registered_model_tag(name2, RegisteredModelTag(key=None, value=""))
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
     # can not use invalid model name
     with pytest.raises(
-        MlflowException, match=r"Registered model name cannot be empty"
+        MlflowException, match=r"Missing value for required parameter 'name'\."
     ) as exception_context:
         store.set_registered_model_tag(None, RegisteredModelTag(key="key", value="value"))
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
@@ -372,12 +418,14 @@ def test_delete_registered_model_tag(store):
         store.delete_registered_model_tag(name1, "anotherKey")
     assert exception_context.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
     # can not delete tag with invalid key
-    with pytest.raises(MlflowException, match=r"Tag name cannot be None") as exception_context:
+    with pytest.raises(
+        MlflowException, match=r"Missing value for required parameter 'key'"
+    ) as exception_context:
         store.delete_registered_model_tag(name2, None)
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
     # can not use invalid model name
     with pytest.raises(
-        MlflowException, match=r"Registered model name cannot be empty"
+        MlflowException, match=r"Missing value for required parameter 'name'\."
     ) as exception_context:
         store.delete_registered_model_tag(None, "key")
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
@@ -388,7 +436,7 @@ def test_create_model_version(store):
     store.create_registered_model(name)
     run_id = uuid.uuid4().hex
     with mock.patch("time.time", return_value=456778):
-        mv1 = store.create_model_version(name, "a/b/CD", run_id)
+        mv1 = _create_model_version(store, name, "a/b/CD", run_id)
         assert mv1.name == name
         assert mv1.version == 1
 
@@ -412,7 +460,10 @@ def test_create_model_version(store):
     assert mvd2.version == 2
 
     # create model version with tags return model version entity with tags
-    tags = [ModelVersionTag("key", "value"), ModelVersionTag("anotherKey", "some other value")]
+    tags = [
+        ModelVersionTag("key", "value"),
+        ModelVersionTag("anotherKey", "some other value"),
+    ]
     mv3 = _create_model_version(store, name, tags=tags)
     mvd3 = store.get_model_version(name=mv3.name, version=mv3.version)
     assert mv3.version == 3
@@ -458,7 +509,10 @@ def test_update_model_version(store):
 
     # update stage
     store.transition_model_version_stage(
-        name=mv1.name, version=mv1.version, stage="Production", archive_existing_versions=False
+        name=mv1.name,
+        version=mv1.version,
+        stage="Production",
+        archive_existing_versions=False,
     )
     mvd2 = store.get_model_version(name=mv1.name, version=mv1.version)
     assert mvd2.name == name
@@ -627,6 +681,15 @@ def test_delete_model_version(store):
     assert exception_context.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
 
 
+def _search_model_versions(fs, filter_string=None, max_results=10, order_by=None, page_token=None):
+    return fs.search_model_versions(
+        filter_string=filter_string,
+        max_results=max_results,
+        order_by=order_by,
+        page_token=page_token,
+    )
+
+
 def test_search_model_versions(store):
     # create some model versions
     name = "test_for_search_MV"
@@ -644,10 +707,14 @@ def test_search_model_versions(store):
     assert mv4.version == 4
 
     def search_versions(filter_string):
-        return [mvd.version for mvd in store.search_model_versions(filter_string)]
+        return [mvd.version for mvd in _search_model_versions(store, filter_string)]
 
     # search using name should return all 4 versions
     assert set(search_versions(f"name='{name}'")) == {1, 2, 3, 4}
+
+    # search using version
+    assert set(search_versions("version_number=2")) == {2}
+    assert set(search_versions("version_number<=3")) == {1, 2, 3}
 
     # search using run_id_1 should return version 1
     assert set(search_versions(f"run_id='{run_id_1}'")) == {1}
@@ -659,10 +726,18 @@ def test_search_model_versions(store):
     assert set(search_versions(f"run_id IN ('{run_id_1}','{run_id_2}')")) == {1, 2, 3}
 
     # search IN operator is case sensitive
-    assert set(search_versions(f"run_id IN ('{run_id_1.upper()}','{run_id_2}')")) == {2, 3}
+    assert set(search_versions(f"run_id IN ('{run_id_1.upper()}','{run_id_2}')")) == {
+        2,
+        3,
+    }
 
     # search IN operator with right-hand side value containing whitespaces
     assert set(search_versions(f"run_id IN ('{run_id_1}', '{run_id_2}')")) == {1, 2, 3}
+
+    # search IN operator with other conditions
+    assert set(
+        search_versions(f"version_number=2 AND run_id IN ('{run_id_1.upper()}','{run_id_2}')")
+    ) == {2}
 
     # search using the IN operator with bad lists should return exceptions
     with pytest.raises(
@@ -733,6 +808,14 @@ def test_search_model_versions(store):
         search_versions("run_id IN ('runid1',,'runid2')")
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
 
+    # search using source_path "A/D" should return version 3 and 4
+    assert set(search_versions("source_path = 'A/D'")) == {3, 4}
+
+    # search using source_path "A" should not return anything
+    assert len(search_versions("source_path = 'A'")) == 0
+    assert len(search_versions("source_path = 'A/'")) == 0
+    assert len(search_versions("source_path = ''")) == 0
+
     # delete mv4. search should not return version 4
     store.delete_model_version(name=mv4.name, version=mv4.version)
     assert set(search_versions("")) == {1, 2, 3}
@@ -742,20 +825,119 @@ def test_search_model_versions(store):
     assert set(search_versions(f"name='{name}'")) == {1, 2, 3}
 
     store.transition_model_version_stage(
-        name=mv1.name, version=mv1.version, stage="production", archive_existing_versions=False
+        name=mv1.name,
+        version=mv1.version,
+        stage="production",
+        archive_existing_versions=False,
     )
 
     store.update_model_version(
         name=mv1.name, version=mv1.version, description="Online prediction model!"
     )
 
-    mvds = store.search_model_versions(f"run_id = '{run_id_1}'")
+    mvds = store.search_model_versions(f"run_id = '{run_id_1}'", max_results=10)
     assert len(mvds) == 1
     assert isinstance(mvds[0], ModelVersion)
     assert mvds[0].current_stage == "Production"
     assert mvds[0].run_id == run_id_1
     assert mvds[0].source == "A/B"
     assert mvds[0].description == "Online prediction model!"
+
+
+def test_search_model_versions_order_by_simple(store):
+    # create some model versions
+    names = ["RM1", "RM2", "RM3", "RM4", "RM1", "RM4"]
+    sources = ["A"] * 3 + ["B"] * 3
+    run_ids = [uuid.uuid4().hex for _ in range(6)]
+    for name in set(names):
+        store.create_registered_model(name)
+    for i in range(6):
+        _create_model_version(store, name=names[i], source=sources[i], run_id=run_ids[i])
+        time.sleep(0.001)  # sleep for windows fs timestamp precision issues
+
+    # by default order by last_updated_timestamp DESC
+    mvs = _search_model_versions(store).to_list()
+    assert [mv.name for mv in mvs] == names[::-1]
+    assert [mv.version for mv in mvs] == [2, 2, 1, 1, 1, 1]
+
+    # order by name DESC
+    mvs = _search_model_versions(store, order_by=["name DESC"])
+    assert [mv.name for mv in mvs] == sorted(names)[::-1]
+    assert [mv.version for mv in mvs] == [2, 1, 1, 1, 2, 1]
+
+    # order by version DESC
+    mvs = _search_model_versions(store, order_by=["version_number DESC"])
+    assert [mv.name for mv in mvs] == ["RM1", "RM4", "RM1", "RM2", "RM3", "RM4"]
+    assert [mv.version for mv in mvs] == [2, 2, 1, 1, 1, 1]
+
+    # order by creation_timestamp DESC
+    mvs = _search_model_versions(store, order_by=["creation_timestamp DESC"])
+    assert [mv.name for mv in mvs] == names[::-1]
+    assert [mv.version for mv in mvs] == [2, 2, 1, 1, 1, 1]
+
+    # order by last_updated_timestamp ASC
+    store.update_model_version(names[0], 1, "latest updated")
+    mvs = _search_model_versions(store, order_by=["last_updated_timestamp ASC"])
+    assert mvs[-1].name == names[0]
+    assert mvs[-1].version == 1
+
+
+def test_search_model_versions_pagination(store):
+    def search_versions(filter_string, page_token=None, max_results=10):
+        result = _search_model_versions(
+            store,
+            filter_string=filter_string,
+            page_token=page_token,
+            max_results=max_results,
+        )
+        return result.to_list(), result.token
+
+    name = "test_for_search_MV_pagination"
+    store.create_registered_model(name)
+    mvs = [_create_model_version(store, name) for _ in range(50)][::-1]
+
+    # test flow with fixed max_results
+    returned_mvs = []
+    query = "name LIKE 'test_for_search_MV_pagination%'"
+    result, token = search_versions(query, page_token=None, max_results=5)
+    returned_mvs.extend(result)
+    while token:
+        result, token = search_versions(query, page_token=token, max_results=5)
+        returned_mvs.extend(result)
+    assert mvs == returned_mvs
+
+    # test that pagination will return all valid results in sorted order
+    # by name ascending
+    result, token1 = search_versions(query, max_results=5)
+    assert token1 is not None
+    assert result == mvs[0:5]
+
+    result, token2 = search_versions(query, page_token=token1, max_results=10)
+    assert token2 is not None
+    assert result == mvs[5:15]
+
+    result, token3 = search_versions(query, page_token=token2, max_results=20)
+    assert token3 is not None
+    assert result == mvs[15:35]
+
+    result, token4 = search_versions(query, page_token=token3, max_results=100)
+    # assert that page token is None
+    assert token4 is None
+    assert result == mvs[35:]
+
+    # test that providing a completely invalid page token throws
+    with pytest.raises(
+        MlflowException, match=r"Invalid page token, could not base64-decode"
+    ) as exception_context:
+        search_versions(query, page_token="evilhax", max_results=20)
+    assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+
+    # test that providing too large of a max_results throws
+    with pytest.raises(
+        MlflowException, match=r"Invalid value for max_results."
+    ) as exception_context:
+        search_versions(query, page_token="evilhax", max_results=1e15)
+    assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
 
 
 def test_search_model_versions_by_tag(store):
@@ -783,7 +965,7 @@ def test_search_model_versions_by_tag(store):
     assert mv2.version == 2
 
     def search_versions(filter_string):
-        return [mvd.version for mvd in store.search_model_versions(filter_string)]
+        return [mvd.version for mvd in _search_model_versions(store, filter_string)]
 
     assert search_versions(f"name = '{name}' and tag.t2 = 'xyz'") == [1]
     assert search_versions("name = 'wrong_name' and tag.t2 = 'xyz'") == []
@@ -803,14 +985,14 @@ def test_search_model_versions_by_tag(store):
 
 
 class SearchRegisteredModelsResult(NamedTuple):
-    names: List[str]
+    names: list[str]
     token: str
 
 
 def _search_registered_models(
-    fs, filter_string=None, max_results=10, order_by=None, page_token=None
+    store, filter_string=None, max_results=10, order_by=None, page_token=None
 ):
-    result = fs.search_registered_models(
+    result = store.search_registered_models(
         filter_string=filter_string,
         max_results=max_results,
         order_by=order_by,
@@ -990,8 +1172,7 @@ def test_search_registered_models_by_tag(store):
 
 def test_search_registered_models_order_by_simple(store):
     # create some registered models
-    prefix = "test_for_search_"
-    names = [prefix + name for name in ["RM1", "RM2", "RM3", "RM4", "RM4A", "RM4ab"]]
+    names = ["RM1", "RM2", "RM3", "RM4", "RM4A", "RM4ab"]
     for name in names:
         store.create_registered_model(name)
         time.sleep(0.001)  # sleep for windows store timestamp precision issues
@@ -1080,12 +1261,20 @@ def test_search_registered_model_order_by(store):
     assert returned_rms == rms[::-1]
     # last_updated_timestamp descending should have the newest RMs first
     res = _search_registered_models(
-        store, query, page_token=None, order_by=["last_updated_timestamp DESC"], max_results=100
+        store,
+        query,
+        page_token=None,
+        order_by=["last_updated_timestamp DESC"],
+        max_results=100,
     )
     assert res.names == rms[::-1]
     # last_updated_timestamp ascending should have the oldest RMs first
     res = _search_registered_models(
-        store, query, page_token=None, order_by=["last_updated_timestamp ASC"], max_results=100
+        store,
+        query,
+        page_token=None,
+        order_by=["last_updated_timestamp ASC"],
+        max_results=100,
     )
     assert res.names == rms
     # name ascending should have the original order
@@ -1095,7 +1284,11 @@ def test_search_registered_model_order_by(store):
     assert res.names == rms
     # test that no ASC/DESC defaults to ASC
     res = _search_registered_models(
-        store, query, page_token=None, order_by=["last_updated_timestamp"], max_results=100
+        store,
+        query,
+        page_token=None,
+        order_by=["last_updated_timestamp"],
+        max_results=100,
     )
     assert res.names == rms
     with mock.patch(
@@ -1123,7 +1316,11 @@ def test_search_registered_model_order_by(store):
     assert res.names == [rm1, rm2, rm3, rm4]
     # test default tiebreak with descending timestamps
     res = _search_registered_models(
-        store, query, page_token=None, order_by=["last_updated_timestamp DESC"], max_results=100
+        store,
+        query,
+        page_token=None,
+        order_by=["last_updated_timestamp DESC"],
+        max_results=100,
     )
     assert res.names == [rm3, rm4, rm1, rm2]
 
@@ -1199,7 +1396,7 @@ def test_set_model_version_tag(store):
     long_tag = ModelVersionTag("longTagKey", "a" * 5001)
     with pytest.raises(
         MlflowException,
-        match=r"Model version value '.+' had length \d+, which exceeded length limit of 5000",
+        match="'value' exceeds the maximum length of 5000 characters",
     ) as exception_context:
         store.set_model_version_tag(name1, 1, long_tag)
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
@@ -1207,17 +1404,20 @@ def test_set_model_version_tag(store):
     long_tag = ModelVersionTag("longTagKey", "a" * 4999)
     store.set_model_version_tag(name1, 1, long_tag)
     # can not set invalid tag
-    with pytest.raises(MlflowException, match=r"Tag name cannot be None") as exception_context:
+    with pytest.raises(
+        MlflowException, match=r"Missing value for required parameter 'key'"
+    ) as exception_context:
         store.set_model_version_tag(name2, 1, ModelVersionTag(key=None, value=""))
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
     # can not use invalid model name or version
     with pytest.raises(
-        MlflowException, match=r"Registered model name cannot be empty"
+        MlflowException, match=r"Missing value for required parameter 'name'\."
     ) as exception_context:
         store.set_model_version_tag(None, 1, ModelVersionTag(key="key", value="value"))
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
     with pytest.raises(
-        MlflowException, match=r"Model version must be an integer"
+        MlflowException,
+        match=r"Parameter 'version' must be an integer, got 'I am not a version'.",
     ) as exception_context:
         store.set_model_version_tag(
             name2, "I am not a version", ModelVersionTag(key="key", value="value")
@@ -1268,20 +1468,81 @@ def test_delete_model_version_tag(store):
         store.delete_model_version_tag(name2, 1, "key")
     assert exception_context.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
     # can not delete tag with invalid key
-    with pytest.raises(MlflowException, match=r"Tag name cannot be None") as exception_context:
+    with pytest.raises(
+        MlflowException, match=r"Missing value for required parameter 'key'"
+    ) as exception_context:
         store.delete_model_version_tag(name1, 2, None)
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
     # can not use invalid model name or version
     with pytest.raises(
-        MlflowException, match=r"Registered model name cannot be empty"
+        MlflowException, match=r"Missing value for required parameter 'name'\."
     ) as exception_context:
         store.delete_model_version_tag(None, 2, "key")
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
     with pytest.raises(
-        MlflowException, match=r"Model version must be an integer"
+        MlflowException, match=r"Parameter 'version' must be an integer, got 'I am not a version'\."
     ) as exception_context:
         store.delete_model_version_tag(name1, "I am not a version", "key")
     assert exception_context.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+
+
+def _setup_and_test_aliases(store, model_name):
+    store.create_registered_model(model_name)
+    run_id_1 = uuid.uuid4().hex
+    run_id_2 = uuid.uuid4().hex
+    store.create_model_version(model_name, "v1", run_id_1)
+    store.create_model_version(model_name, "v2", run_id_2)
+    store.set_registered_model_alias(model_name, "test_alias", "2")
+    model = store.get_registered_model(model_name)
+    assert model.aliases == {"test_alias": "2"}
+    mv1 = store.get_model_version(model_name, 1)
+    mv2 = store.get_model_version(model_name, 2)
+    assert mv1.aliases == []
+    assert mv2.aliases == ["test_alias"]
+
+
+def test_set_registered_model_alias(store):
+    _setup_and_test_aliases(store, "SetRegisteredModelAlias_TestMod")
+
+
+def test_delete_registered_model_alias(store):
+    model_name = "DeleteRegisteredModelAlias_TestMod"
+    _setup_and_test_aliases(store, model_name)
+    store.delete_registered_model_alias(model_name, "test_alias")
+    model = store.get_registered_model(model_name)
+    assert model.aliases == {}
+    mv2 = store.get_model_version(model_name, 2)
+    assert mv2.aliases == []
+    with pytest.raises(MlflowException, match=r"Registered model alias test_alias not found."):
+        store.get_model_version_by_alias(model_name, "test_alias")
+
+
+def test_get_model_version_by_alias(store):
+    model_name = "GetModelVersionByAlias_TestMod"
+    _setup_and_test_aliases(store, model_name)
+    mv = store.get_model_version_by_alias(model_name, "test_alias")
+    assert mv.aliases == ["test_alias"]
+
+
+def test_delete_model_version_deletes_alias(store):
+    model_name = "DeleteModelVersionDeletesAlias_TestMod"
+    _setup_and_test_aliases(store, model_name)
+    store.delete_model_version(model_name, 2)
+    model = store.get_registered_model(model_name)
+    assert model.aliases == {}
+    with pytest.raises(MlflowException, match=r"Registered model alias test_alias not found."):
+        store.get_model_version_by_alias(model_name, "test_alias")
+
+
+def test_delete_model_deletes_alias(store):
+    model_name = "DeleteModelDeletesAlias_TestMod"
+    _setup_and_test_aliases(store, model_name)
+    store.delete_registered_model(model_name)
+    with pytest.raises(
+        MlflowException,
+        match=r"Registered Model with name=DeleteModelDeletesAlias_TestMod not found",
+    ):
+        store.get_model_version_by_alias(model_name, "test_alias")
 
 
 def test_pyfunc_model_registry_with_file_store(store):
@@ -1289,31 +1550,264 @@ def test_pyfunc_model_registry_with_file_store(store):
     from mlflow.pyfunc import PythonModel
 
     class MyModel(PythonModel):
-        def predict(self, context, model_input):
+        def predict(self, context, model_input, params=None):
             return 7
 
     mlflow.set_registry_uri(path_to_local_file_uri(store.root_directory))
     with mlflow.start_run():
-        mlflow.pyfunc.log_model(
-            python_model=MyModel(), artifact_path="foo", registered_model_name="model1"
-        )
-        mlflow.pyfunc.log_model(
-            python_model=MyModel(), artifact_path="foo", registered_model_name="model2"
-        )
-        mlflow.pyfunc.log_model(
-            python_model=MyModel(), artifact_path="foo", registered_model_name="model1"
-        )
+        mlflow.pyfunc.log_model("foo", python_model=MyModel(), registered_model_name="model1")
+        mlflow.pyfunc.log_model("foo", python_model=MyModel(), registered_model_name="model2")
+        mlflow.pyfunc.log_model("model", python_model=MyModel(), registered_model_name="model1")
 
     with mlflow.start_run():
         mlflow.log_param("A", "B")
 
-    models = store.search_registered_models(max_results=10)
-    assert len(models) == 2
-    assert models[0].name == "model1"
-    assert models[1].name == "model2"
-    mv1 = store.search_model_versions("name = 'model1'")
-    assert len(mv1) == 2
-    assert mv1[0].name == "model1"
-    mv2 = store.search_model_versions("name = 'model2'")
-    assert len(mv2) == 1
-    assert mv2[0].name == "model2"
+        models = store.search_registered_models(max_results=10)
+        assert len(models) == 2
+        assert models[0].name == "model1"
+        assert models[1].name == "model2"
+        mv1 = store.search_model_versions("name = 'model1'", max_results=10)
+        assert len(mv1) == 2
+        assert mv1[0].name == "model1"
+        mv2 = store.search_model_versions("name = 'model2'", max_results=10)
+        assert len(mv2) == 1
+        assert mv2[0].name == "model2"
+
+
+@pytest.mark.parametrize("copy_to_same_model", [False, True])
+def test_copy_model_version(store, copy_to_same_model):
+    name1 = "test_for_copy_MV1"
+    store.create_registered_model(name1)
+    src_tags = [
+        ModelVersionTag("key", "value"),
+        ModelVersionTag("anotherKey", "some other value"),
+    ]
+    src_mv = _create_model_version(
+        store,
+        name1,
+        tags=src_tags,
+        run_link="dummylink",
+        description="test description",
+    )
+
+    # Make some changes to the src MV that won't be copied over
+    store.transition_model_version_stage(
+        name1, src_mv.version, "Production", archive_existing_versions=False
+    )
+
+    copy_rm_name = name1 if copy_to_same_model else "test_for_copy_MV2"
+    copy_mv_version = 2 if copy_to_same_model else 1
+    timestamp = time.time()
+    dst_mv = store.copy_model_version(src_mv, copy_rm_name)
+    assert dst_mv.name == copy_rm_name
+    assert dst_mv.version == copy_mv_version
+
+    copied_mv = store.get_model_version(dst_mv.name, dst_mv.version)
+    assert copied_mv.name == copy_rm_name
+    assert copied_mv.version == copy_mv_version
+    assert copied_mv.current_stage == "None"
+    assert copied_mv.creation_timestamp >= timestamp
+    assert copied_mv.last_updated_timestamp >= timestamp
+    assert copied_mv.description == "test description"
+    assert copied_mv.source == f"models:/{src_mv.name}/{src_mv.version}"
+    assert store.get_model_version_download_uri(dst_mv.name, dst_mv.version) == src_mv.source
+    assert copied_mv.run_link == "dummylink"
+    assert copied_mv.run_id == src_mv.run_id
+    assert copied_mv.status == "READY"
+    assert copied_mv.status_message is None
+    assert copied_mv.tags == {"key": "value", "anotherKey": "some other value"}
+
+    # Copy a model version copy
+    double_copy_mv = store.copy_model_version(copied_mv, "test_for_copy_MV3")
+    assert double_copy_mv.source == f"models:/{copied_mv.name}/{copied_mv.version}"
+    assert store.get_model_version_download_uri(dst_mv.name, dst_mv.version) == src_mv.source
+
+
+def test_writing_model_version_preserves_storage_location(store):
+    name = "test_storage_location_MV1"
+    source = "/special/source"
+    store.create_registered_model(name)
+    _create_model_version(store, name, source=source)
+    _create_model_version(store, name, source=source)
+
+    # Run through all the operations that modify model versions and make sure that the
+    # `storage_location` property is not dropped.
+    store.transition_model_version_stage(name, 1, "Production", archive_existing_versions=False)
+    assert store._fetch_file_model_version_if_exists(name, 1).storage_location == source
+    store.update_model_version(name, 1, description="test description")
+    assert store._fetch_file_model_version_if_exists(name, 1).storage_location == source
+    store.transition_model_version_stage(name, 1, "Production", archive_existing_versions=True)
+    assert store._fetch_file_model_version_if_exists(name, 1).storage_location == source
+    store.rename_registered_model(name, "test_storage_location_new")
+    assert (
+        store._fetch_file_model_version_if_exists("test_storage_location_new", 1).storage_location
+        == source
+    )
+
+
+def test_search_prompts(store):
+    store.create_registered_model("model", tags=[RegisteredModelTag(key="fruit", value="apple")])
+
+    store.create_registered_model(
+        "prompt_1", tags=[RegisteredModelTag(key=IS_PROMPT_TAG_KEY, value="true")]
+    )
+    store.create_registered_model(
+        "prompt_2",
+        tags=[
+            RegisteredModelTag(key=IS_PROMPT_TAG_KEY, value="true"),
+            RegisteredModelTag(key="fruit", value="apple"),
+        ],
+    )
+
+    # By default, should not return prompts
+    rms = store.search_registered_models(max_results=10)
+    assert len(rms) == 1
+    assert rms[0].name == "model"
+
+    rms = store.search_registered_models(filter_string="tags.fruit = 'apple'", max_results=10)
+    assert len(rms) == 1
+    assert rms[0].name == "model"
+
+    rms = store.search_registered_models(filter_string="name = 'prompt_1'", max_results=10)
+    assert len(rms) == 0
+
+    rms = store.search_registered_models(
+        filter_string="tags.`mlflow.prompt.is_prompt` = 'false'", max_results=10
+    )
+    assert len(rms) == 1
+    assert rms[0].name == "model"
+
+    rms = store.search_registered_models(
+        filter_string="tags.`mlflow.prompt.is_prompt` != 'true'", max_results=10
+    )
+    assert len(rms) == 1
+    assert rms[0].name == "model"
+
+    # Search for prompts
+    rms = store.search_registered_models(
+        filter_string="tags.`mlflow.prompt.is_prompt` = 'true'", max_results=10
+    )
+    assert len(rms) == 2
+    assert {rm.name for rm in rms} == {"prompt_1", "prompt_2"}
+
+    rms = store.search_registered_models(
+        filter_string="name = 'prompt_1' and tags.`mlflow.prompt.is_prompt` = 'true'",
+        max_results=10,
+    )
+    assert len(rms) == 1
+    assert rms[0].name == "prompt_1"
+
+    rms = store.search_registered_models(
+        filter_string="tags.`mlflow.prompt.is_prompt` = 'true' and tags.fruit = 'apple'",
+        max_results=10,
+    )
+    assert len(rms) == 1
+    assert rms[0].name == "prompt_2"
+
+
+def test_search_prompts_versions(store):
+    # A Model
+    store.create_registered_model("model")
+    store.create_model_version(
+        "model", "1", "dummy_source", tags=[ModelVersionTag(key="fruit", value="apple")]
+    )
+
+    # A Prompt with 1 version
+    store.create_registered_model(
+        "prompt_1", tags=[RegisteredModelTag(key=IS_PROMPT_TAG_KEY, value="true")]
+    )
+    store.create_model_version(
+        "prompt_1", "1", "dummy_source", tags=[ModelVersionTag(key=IS_PROMPT_TAG_KEY, value="true")]
+    )
+
+    # A Prompt with 2 versions
+    store.create_registered_model(
+        "prompt_2",
+        tags=[RegisteredModelTag(key=IS_PROMPT_TAG_KEY, value="true")],
+    )
+    store.create_model_version(
+        "prompt_2",
+        "1",
+        "dummy_source",
+        tags=[
+            ModelVersionTag(key=IS_PROMPT_TAG_KEY, value="true"),
+            ModelVersionTag(key="fruit", value="apple"),
+        ],
+    )
+    store.create_model_version(
+        "prompt_2",
+        "2",
+        "dummy_source",
+        tags=[
+            ModelVersionTag(key=IS_PROMPT_TAG_KEY, value="true"),
+            ModelVersionTag(key="fruit", value="orange"),
+        ],
+    )
+
+    # Searching model versions should not return prompts by default either
+    mvs = store.search_model_versions(max_results=10)
+    assert len(mvs) == 1
+    assert mvs[0].name == "model"
+
+    mvs = store.search_model_versions(filter_string="tags.fruit = 'apple'", max_results=10)
+    assert len(mvs) == 1
+    assert mvs[0].name == "model"
+
+    mvs = store.search_model_versions(
+        filter_string="tags.`mlflow.prompt.is_prompt` = 'false'", max_results=10
+    )
+    assert len(mvs) == 1
+    assert mvs[0].name == "model"
+
+    mvs = store.search_model_versions(
+        filter_string="tags.`mlflow.prompt.is_prompt` != 'true'", max_results=10
+    )
+    assert len(mvs) == 1
+    assert mvs[0].name == "model"
+
+    # Search for prompts via search_model_versions
+    mvs = store.search_model_versions(
+        filter_string="tags.`mlflow.prompt.is_prompt` = 'true'", max_results=10
+    )
+    assert len(mvs) == 3
+
+    mvs = store.search_model_versions(
+        filter_string="tags.`mlflow.prompt.is_prompt` = 'true' and name = 'prompt_2'",
+        max_results=10,
+    )
+    assert len(mvs) == 2
+
+    mvs = store.search_model_versions(
+        filter_string="tags.`mlflow.prompt.is_prompt` = 'true' and tags.fruit = 'apple'",
+        max_results=10,
+    )
+    assert len(mvs) == 1
+    assert mvs[0].name == "prompt_2"
+
+
+def test_create_registered_model_handle_prompt_properly(store):
+    prompt_tags = [RegisteredModelTag(key=IS_PROMPT_TAG_KEY, value="true")]
+
+    store.create_registered_model("model")
+
+    store.create_registered_model("prompt", tags=prompt_tags)
+
+    with pytest.raises(MlflowException, match=r"Registered Model \(name=model\) already exists"):
+        store.create_registered_model("model")
+
+    with pytest.raises(MlflowException, match=r"Prompt \(name=prompt\) already exists"):
+        store.create_registered_model("prompt", tags=prompt_tags)
+
+    with pytest.raises(
+        MlflowException,
+        match=r"Tried to create a prompt with name 'model', "
+        r"but the name is already taken by a registered model.",
+    ):
+        store.create_registered_model("model", tags=prompt_tags)
+
+    with pytest.raises(
+        MlflowException,
+        match=r"Tried to create a registered model with name 'prompt', "
+        r"but the name is already taken by a prompt.",
+    ):
+        store.create_registered_model("prompt")

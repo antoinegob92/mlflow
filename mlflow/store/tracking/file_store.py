@@ -1,92 +1,115 @@
+import hashlib
 import json
 import logging
-import time
 import os
-import sys
 import shutil
-
+import sys
+import time
 import uuid
+from dataclasses import dataclass
+from typing import NamedTuple, Optional
 
 from mlflow.entities import (
+    Dataset,
+    DatasetInput,
     Experiment,
+    ExperimentTag,
+    InputTag,
     Metric,
     Param,
     Run,
     RunData,
     RunInfo,
+    RunInputs,
     RunStatus,
     RunTag,
-    ViewType,
     SourceType,
-    ExperimentTag,
+    TraceInfo,
+    ViewType,
+    _DatasetSummary,
 )
 from mlflow.entities.lifecycle_stage import LifecycleStage
 from mlflow.entities.run_info import check_run_is_active
-from mlflow.exceptions import MlflowException, MissingConfigException
+from mlflow.entities.trace_status import TraceStatus
+from mlflow.environment_variables import MLFLOW_TRACKING_DIR
+from mlflow.exceptions import MissingConfigException, MlflowException
 from mlflow.protos import databricks_pb2
 from mlflow.protos.databricks_pb2 import (
     INTERNAL_ERROR,
-    RESOURCE_DOES_NOT_EXIST,
     INVALID_PARAMETER_VALUE,
+    RESOURCE_DOES_NOT_EXIST,
 )
+from mlflow.protos.internal_pb2 import InputVertexType
+from mlflow.store.entities.paged_list import PagedList
 from mlflow.store.model_registry.file_store import FileStore as ModelRegistryFileStore
 from mlflow.store.tracking import (
     DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH,
     SEARCH_MAX_RESULTS_DEFAULT,
     SEARCH_MAX_RESULTS_THRESHOLD,
+    SEARCH_TRACES_DEFAULT_MAX_RESULTS,
 )
 from mlflow.store.tracking.abstract_store import AbstractStore
-from mlflow.store.entities.paged_list import PagedList
+from mlflow.tracing.utils import generate_request_id
 from mlflow.utils import get_results_from_paginated_fn
-from mlflow.utils.name_utils import _generate_random_name, _generate_unique_integer_id
-from mlflow.utils.validation import (
-    _validate_metric,
-    _validate_metric_name,
-    _validate_param_name,
-    _validate_param,
-    _validate_run_id,
-    _validate_tag_name,
-    _validate_experiment_id,
-    _validate_batch_log_limits,
-    _validate_batch_log_data,
-    _validate_param_keys_unique,
-    _validate_experiment_name,
-)
-from mlflow.utils.env import get_env
 from mlflow.utils.file_utils import (
-    is_directory,
-    list_subdirs,
-    mkdir,
-    exists,
-    write_yaml,
-    overwrite_yaml,
-    read_yaml,
-    find,
-    read_file_lines,
-    read_file,
-    write_to,
     append_to,
-    make_containing_dirs,
-    mv,
+    exists,
+    find,
     get_parent_dir,
+    is_directory,
     list_all,
+    list_subdirs,
     local_file_uri_to_path,
+    make_containing_dirs,
+    mkdir,
+    mv,
+    overwrite_yaml,
     path_to_local_file_uri,
+    read_file,
+    read_file_lines,
+    read_yaml,
+    write_to,
+    write_yaml,
 )
-from mlflow.utils.search_utils import SearchUtils, SearchExperimentsUtils
+from mlflow.utils.mlflow_tags import (
+    MLFLOW_ARTIFACT_LOCATION,
+    MLFLOW_DATASET_CONTEXT,
+    MLFLOW_LOGGED_MODELS,
+    MLFLOW_RUN_NAME,
+    _get_run_name_from_tags,
+)
+from mlflow.utils.name_utils import _generate_random_name, _generate_unique_integer_id
+from mlflow.utils.search_utils import (
+    SearchExperimentsUtils,
+    SearchTraceUtils,
+    SearchUtils,
+)
 from mlflow.utils.string_utils import is_string_type
-from mlflow.utils.time_utils import get_current_time_millis
+from mlflow.utils.time import get_current_time_millis
 from mlflow.utils.uri import (
     append_to_uri_path,
     resolve_uri_if_local,
 )
-from mlflow.utils.mlflow_tags import MLFLOW_LOGGED_MODELS, MLFLOW_RUN_NAME, _get_run_name_from_tags
+from mlflow.utils.validation import (
+    _validate_batch_log_data,
+    _validate_batch_log_limits,
+    _validate_experiment_artifact_location_length,
+    _validate_experiment_id,
+    _validate_experiment_name,
+    _validate_metric,
+    _validate_metric_name,
+    _validate_param,
+    _validate_param_keys_unique,
+    _validate_param_name,
+    _validate_run_id,
+    _validate_tag_name,
+)
 
-_TRACKING_DIR_ENV_VAR = "MLFLOW_TRACKING_DIR"
+_logger = logging.getLogger(__name__)
 
 
 def _default_root_dir():
-    return get_env(_TRACKING_DIR_ENV_VAR) or os.path.abspath(DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH)
+    return MLFLOW_TRACKING_DIR.get() or os.path.abspath(DEFAULT_LOCAL_FILE_AND_ARTIFACT_PATH)
 
 
 def _read_persisted_experiment_dict(experiment_dict):
@@ -140,9 +163,19 @@ class FileStore(AbstractStore):
     PARAMS_FOLDER_NAME = "params"
     TAGS_FOLDER_NAME = "tags"
     EXPERIMENT_TAGS_FOLDER_NAME = "tags"
-    RESERVED_EXPERIMENT_FOLDERS = [EXPERIMENT_TAGS_FOLDER_NAME]
+    DATASETS_FOLDER_NAME = "datasets"
+    INPUTS_FOLDER_NAME = "inputs"
     META_DATA_FILE_NAME = "meta.yaml"
     DEFAULT_EXPERIMENT_ID = "0"
+    TRACE_INFO_FILE_NAME = "trace_info.yaml"
+    TRACES_FOLDER_NAME = "traces"
+    TRACE_TAGS_FOLDER_NAME = "tags"
+    TRACE_REQUEST_METADATA_FOLDER_NAME = "request_metadata"
+    RESERVED_EXPERIMENT_FOLDERS = [
+        EXPERIMENT_TAGS_FOLDER_NAME,
+        DATASETS_FOLDER_NAME,
+        TRACES_FOLDER_NAME,
+    ]
 
     def __init__(self, root_directory=None, artifact_root_uri=None):
         """
@@ -176,9 +209,9 @@ class FileStore(AbstractStore):
         Run checks before running directory operations.
         """
         if not exists(self.root_directory):
-            raise Exception("'%s' does not exist." % self.root_directory)
+            raise Exception(f"'{self.root_directory}' does not exist.")
         if not is_directory(self.root_directory):
-            raise Exception("'%s' is not a directory." % self.root_directory)
+            raise Exception(f"'{self.root_directory}' is not a directory.")
 
     def _get_experiment_path(self, experiment_id, view_type=ViewType.ALL, assert_exists=False):
         parents = []
@@ -205,21 +238,25 @@ class FileStore(AbstractStore):
 
     def _get_metric_path(self, experiment_id, run_uuid, metric_key):
         _validate_run_id(run_uuid)
-        _validate_metric_name(metric_key)
+        _validate_metric_name(metric_key, "name")
         return os.path.join(
-            self._get_run_dir(experiment_id, run_uuid), FileStore.METRICS_FOLDER_NAME, metric_key
+            self._get_run_dir(experiment_id, run_uuid),
+            FileStore.METRICS_FOLDER_NAME,
+            metric_key,
         )
 
     def _get_param_path(self, experiment_id, run_uuid, param_name):
         _validate_run_id(run_uuid)
         _validate_param_name(param_name)
         return os.path.join(
-            self._get_run_dir(experiment_id, run_uuid), FileStore.PARAMS_FOLDER_NAME, param_name
+            self._get_run_dir(experiment_id, run_uuid),
+            FileStore.PARAMS_FOLDER_NAME,
+            param_name,
         )
 
     def _get_experiment_tag_path(self, experiment_id, tag_name):
         _validate_experiment_id(experiment_id)
-        _validate_param_name(tag_name)
+        _validate_tag_name(tag_name)
         if not self._has_experiment(experiment_id):
             return None
         return os.path.join(
@@ -232,7 +269,9 @@ class FileStore(AbstractStore):
         _validate_run_id(run_uuid)
         _validate_tag_name(tag_name)
         return os.path.join(
-            self._get_run_dir(experiment_id, run_uuid), FileStore.TAGS_FOLDER_NAME, tag_name
+            self._get_run_dir(experiment_id, run_uuid),
+            FileStore.TAGS_FOLDER_NAME,
+            tag_name,
         )
 
     def _get_artifact_dir(self, experiment_id, run_uuid):
@@ -265,14 +304,14 @@ class FileStore(AbstractStore):
     ):
         if not isinstance(max_results, int) or max_results < 1:
             raise MlflowException(
-                "Invalid value for max_results. It must be a positive integer,"
-                f" but got {max_results}",
+                f"Invalid value {max_results} for parameter 'max_results' supplied. It must be "
+                f"a positive integer",
                 INVALID_PARAMETER_VALUE,
             )
         if max_results > SEARCH_MAX_RESULTS_THRESHOLD:
             raise MlflowException(
-                f"Invalid value for max_results. It must be at most {SEARCH_MAX_RESULTS_THRESHOLD},"
-                f" but got {max_results}",
+                f"Invalid value {max_results} for parameter 'max_results' supplied. It must be at "
+                f"most {SEARCH_MAX_RESULTS_THRESHOLD}",
                 INVALID_PARAMETER_VALUE,
             )
 
@@ -292,7 +331,8 @@ class FileStore(AbstractStore):
                     experiments.append(exp)
             except MissingConfigException as e:
                 logging.warning(
-                    f"Malformed experiment '{exp_id}'. Detailed error {e}", exc_info=True
+                    f"Malformed experiment '{exp_id}'. Detailed error {e}",
+                    exc_info=True,
                 )
         filtered = SearchExperimentsUtils.filter(experiments, filter_string)
         sorted_experiments = SearchExperimentsUtils.sort(
@@ -306,7 +346,7 @@ class FileStore(AbstractStore):
     def get_experiment_by_name(self, experiment_name):
         def pagination_wrapper_func(number_to_get, next_page_token):
             return self.search_experiments(
-                view_type=ViewType.ACTIVE_ONLY,
+                view_type=ViewType.ALL,
                 max_results=number_to_get,
                 filter_string=f"name = '{experiment_name}'",
                 page_token=next_page_token,
@@ -349,21 +389,25 @@ class FileStore(AbstractStore):
         if experiment is not None:
             if experiment.lifecycle_stage == LifecycleStage.DELETED:
                 raise MlflowException(
-                    "Experiment '%s' already exists in deleted state. "
+                    f"Experiment {experiment.name!r} already exists in deleted state. "
                     "You can restore the experiment, or permanently delete the experiment "
                     "from the .trash folder (under tracking server's root folder) in order to "
-                    "use this experiment name again." % experiment.name,
+                    "use this experiment name again.",
                     databricks_pb2.RESOURCE_ALREADY_EXISTS,
                 )
             else:
                 raise MlflowException(
-                    "Experiment '%s' already exists." % experiment.name,
+                    f"Experiment '{experiment.name}' already exists.",
                     databricks_pb2.RESOURCE_ALREADY_EXISTS,
                 )
 
     def create_experiment(self, name, artifact_location=None, tags=None):
         self._check_root_dir()
         _validate_experiment_name(name)
+
+        if artifact_location:
+            _validate_experiment_artifact_location_length(artifact_location)
+
         self._validate_experiment_does_not_exist(name)
         experiment_id = _generate_unique_integer_id()
         return self._create_experiment_with_id(name, str(experiment_id), artifact_location, tags)
@@ -377,14 +421,10 @@ class FileStore(AbstractStore):
         experiment_dir = self._get_experiment_path(experiment_id, view_type)
         if experiment_dir is None:
             raise MlflowException(
-                "Could not find experiment with ID %s" % experiment_id,
+                f"Could not find experiment with ID {experiment_id}",
                 databricks_pb2.RESOURCE_DOES_NOT_EXIST,
             )
         meta = FileStore._read_yaml(experiment_dir, FileStore.META_DATA_FILE_NAME)
-        if experiment_dir.startswith(self.trash_folder):
-            meta["lifecycle_stage"] = LifecycleStage.DELETED
-        else:
-            meta["lifecycle_stage"] = LifecycleStage.ACTIVE
         meta["tags"] = self.get_all_experiment_tags(experiment_id)
         experiment = _read_persisted_experiment_dict(meta)
         if experiment_id != experiment.experiment_id:
@@ -403,14 +443,17 @@ class FileStore(AbstractStore):
         Fetch the experiment.
         Note: This API will search for active as well as deleted experiments.
 
-        :param experiment_id: Integer id for the experiment
-        :return: A single Experiment object if it exists, otherwise raises an Exception.
+        Args:
+            experiment_id: Integer id for the experiment
+
+        Returns:
+            A single Experiment object if it exists, otherwise raises an Exception.
         """
         experiment_id = FileStore.DEFAULT_EXPERIMENT_ID if experiment_id is None else experiment_id
         experiment = self._get_experiment(experiment_id)
         if experiment is None:
             raise MlflowException(
-                "Experiment '%s' does not exist." % experiment_id,
+                f"Experiment '{experiment_id}' does not exist.",
                 databricks_pb2.RESOURCE_DOES_NOT_EXIST,
             )
         return experiment
@@ -425,11 +468,20 @@ class FileStore(AbstractStore):
         experiment_dir = self._get_experiment_path(experiment_id, ViewType.ACTIVE_ONLY)
         if experiment_dir is None:
             raise MlflowException(
-                "Could not find experiment with ID %s" % experiment_id,
+                f"Could not find experiment with ID {experiment_id}",
                 databricks_pb2.RESOURCE_DOES_NOT_EXIST,
             )
         experiment = self._get_experiment(experiment_id)
-        experiment._set_last_update_time(get_current_time_millis())
+        experiment._lifecycle_stage = LifecycleStage.DELETED
+        deletion_time = get_current_time_millis()
+        experiment._set_last_update_time(deletion_time)
+        runs = self._list_run_infos(experiment_id, view_type=ViewType.ACTIVE_ONLY)
+        for run_info in runs:
+            if run_info is not None:
+                new_info = run_info._copy_with_overrides(lifecycle_stage=LifecycleStage.DELETED)
+                self._overwrite_run_info(new_info, deleted_time=deletion_time)
+            else:
+                logging.warning("Run metadata is in invalid state.")
         meta_dir = os.path.join(self.root_directory, experiment_id)
         overwrite_yaml(
             root=meta_dir,
@@ -450,20 +502,28 @@ class FileStore(AbstractStore):
         experiment_dir = self._get_experiment_path(experiment_id, ViewType.DELETED_ONLY)
         if experiment_dir is None:
             raise MlflowException(
-                "Could not find deleted experiment with ID %d" % experiment_id,
+                f"Could not find deleted experiment with ID {experiment_id}",
                 databricks_pb2.RESOURCE_DOES_NOT_EXIST,
             )
         conflict_experiment = self._get_experiment_path(experiment_id, ViewType.ACTIVE_ONLY)
         if conflict_experiment is not None:
             raise MlflowException(
-                "Cannot restore experiment with ID %d. "
-                "An experiment with same ID already exists." % experiment_id,
+                f"Cannot restore experiment with ID {experiment_id}. "
+                "An experiment with same ID already exists.",
                 databricks_pb2.RESOURCE_ALREADY_EXISTS,
             )
         mv(experiment_dir, self.root_directory)
         experiment = self._get_experiment(experiment_id)
         meta_dir = os.path.join(self.root_directory, experiment_id)
+        experiment._lifecycle_stage = LifecycleStage.ACTIVE
         experiment._set_last_update_time(get_current_time_millis())
+        runs = self._list_run_infos(experiment_id, view_type=ViewType.DELETED_ONLY)
+        for run_info in runs:
+            if run_info is not None:
+                new_info = run_info._copy_with_overrides(lifecycle_stage=LifecycleStage.ACTIVE)
+                self._overwrite_run_info(new_info, deleted_time=None)
+            else:
+                logging.warning("Run metadata is in invalid state.")
         overwrite_yaml(
             root=meta_dir,
             file_name=FileStore.META_DATA_FILE_NAME,
@@ -477,7 +537,7 @@ class FileStore(AbstractStore):
         experiment = self._get_experiment(experiment_id)
         if experiment is None:
             raise MlflowException(
-                "Experiment '%s' does not exist." % experiment_id,
+                f"Experiment '{experiment_id}' does not exist.",
                 databricks_pb2.RESOURCE_DOES_NOT_EXIST,
             )
         self._validate_experiment_does_not_exist(new_name)
@@ -486,7 +546,7 @@ class FileStore(AbstractStore):
         if experiment.lifecycle_stage != LifecycleStage.ACTIVE:
             raise Exception(
                 "Cannot rename experiment in non-active lifecycle stage."
-                " Current stage: %s" % experiment.lifecycle_stage
+                f" Current stage: {experiment.lifecycle_stage}"
             )
         overwrite_yaml(
             root=meta_dir,
@@ -498,7 +558,8 @@ class FileStore(AbstractStore):
         run_info = self._get_run_info(run_id)
         if run_info is None:
             raise MlflowException(
-                "Run '%s' metadata is in invalid state." % run_id, databricks_pb2.INVALID_STATE
+                f"Run '{run_id}' metadata is in invalid state.",
+                databricks_pb2.INVALID_STATE,
             )
         new_info = run_info._copy_with_overrides(lifecycle_stage=LifecycleStage.DELETED)
         self._overwrite_run_info(new_info, deleted_time=get_current_time_millis())
@@ -514,6 +575,7 @@ class FileStore(AbstractStore):
     def _get_deleted_runs(self, older_than=0):
         """
         Get all deleted run ids.
+
         Args:
             older_than: get runs that is older than this variable in number of milliseconds.
                         defaults to 0 ms to get all deleted runs.
@@ -521,7 +583,9 @@ class FileStore(AbstractStore):
         current_time = get_current_time_millis()
         experiment_ids = self._get_active_experiments() + self._get_deleted_experiments()
         deleted_runs = self.search_runs(
-            experiment_ids=experiment_ids, filter_string="", run_view_type=ViewType.DELETED_ONLY
+            experiment_ids=experiment_ids,
+            filter_string="",
+            run_view_type=ViewType.DELETED_ONLY,
         )
         deleted_run_ids = []
         for deleted_run in deleted_runs:
@@ -536,7 +600,8 @@ class FileStore(AbstractStore):
         run_info = self._get_run_info(run_id)
         if run_info is None:
             raise MlflowException(
-                "Run '%s' metadata is in invalid state." % run_id, databricks_pb2.INVALID_STATE
+                f"Run '{run_id}' metadata is in invalid state.",
+                databricks_pb2.INVALID_STATE,
             )
         new_info = run_info._copy_with_overrides(lifecycle_stage=LifecycleStage.ACTIVE)
         self._overwrite_run_info(new_info, deleted_time=None)
@@ -579,13 +644,13 @@ class FileStore(AbstractStore):
         experiment = self.get_experiment(experiment_id)
         if experiment is None:
             raise MlflowException(
-                "Could not create run under experiment with ID %s - no such experiment "
-                "exists." % experiment_id,
+                f"Could not create run under experiment with ID {experiment_id} - no such "
+                "experiment exists.",
                 databricks_pb2.RESOURCE_DOES_NOT_EXIST,
             )
         if experiment.lifecycle_stage != LifecycleStage.ACTIVE:
             raise MlflowException(
-                "Could not create run under non-active experiment with ID %s." % experiment_id,
+                f"Could not create run under non-active experiment with ID {experiment_id}.",
                 databricks_pb2.INVALID_STATE,
             )
         tags = tags or []
@@ -634,7 +699,8 @@ class FileStore(AbstractStore):
         run_info = self._get_run_info(run_id)
         if run_info is None:
             raise MlflowException(
-                "Run '%s' metadata is in invalid state." % run_id, databricks_pb2.INVALID_STATE
+                f"Run '{run_id}' metadata is in invalid state.",
+                databricks_pb2.INVALID_STATE,
             )
         return self._get_run_from_info(run_info)
 
@@ -642,11 +708,12 @@ class FileStore(AbstractStore):
         metrics = self._get_all_metrics(run_info)
         params = self._get_all_params(run_info)
         tags = self._get_all_tags(run_info)
+        inputs: RunInputs = self._get_all_inputs(run_info)
         if not run_info.run_name:
             run_name = _get_run_name_from_tags(tags)
             if run_name:
                 run_info._set_run_name(run_name)
-        return Run(run_info, RunData(metrics, params, tags))
+        return Run(run_info, RunData(metrics, params, tags), inputs)
 
     def _get_run_info(self, run_uuid):
         """
@@ -655,19 +722,19 @@ class FileStore(AbstractStore):
         exp_id, run_dir = self._find_run_root(run_uuid)
         if run_dir is None:
             raise MlflowException(
-                "Run '%s' not found" % run_uuid, databricks_pb2.RESOURCE_DOES_NOT_EXIST
+                f"Run '{run_uuid}' not found", databricks_pb2.RESOURCE_DOES_NOT_EXIST
             )
         run_info = self._get_run_info_from_dir(run_dir)
         if run_info.experiment_id != exp_id:
             raise MlflowException(
-                "Run '%s' metadata is in invalid state." % run_uuid, databricks_pb2.INVALID_STATE
+                f"Run '{run_uuid}' metadata is in invalid state.",
+                databricks_pb2.INVALID_STATE,
             )
         return run_info
 
     def _get_run_info_from_dir(self, run_dir):
         meta = FileStore._read_yaml(run_dir, FileStore.META_DATA_FILE_NAME)
-        run_info = _read_persisted_run_info_dict(meta)
-        return run_info
+        return _read_persisted_run_info_dict(meta)
 
     def _get_run_files(self, run_info, resource_type):
         run_dir = self._get_run_dir(run_info.experiment_id, run_info.run_id)
@@ -707,14 +774,14 @@ class FileStore(AbstractStore):
         return source_dirs[0], file_names
 
     @staticmethod
-    def _get_metric_from_file(parent_path, metric_name):
+    def _get_metric_from_file(parent_path, metric_name, exp_id):
         _validate_metric_name(metric_name)
         metric_objs = [
-            FileStore._get_metric_from_line(metric_name, line)
+            FileStore._get_metric_from_line(metric_name, line, exp_id)
             for line in read_file_lines(parent_path, metric_name)
         ]
         if len(metric_objs) == 0:
-            raise ValueError("Metric '%s' is malformed. No data found." % metric_name)
+            raise ValueError(f"Metric '{metric_name}' is malformed. No data found.")
         # Python performs element-wise comparison of equal-length tuples, ordering them
         # based on their first differing element. Therefore, we use max() operator to find the
         # largest value at the largest timestamp. For more information, see
@@ -730,16 +797,19 @@ class FileStore(AbstractStore):
         parent_path, metric_files = self._get_run_files(run_info, "metric")
         metrics = []
         for metric_file in metric_files:
-            metrics.append(self._get_metric_from_file(parent_path, metric_file))
+            metrics.append(
+                self._get_metric_from_file(parent_path, metric_file, run_info.experiment_id)
+            )
         return metrics
 
     @staticmethod
-    def _get_metric_from_line(metric_name, metric_line):
+    def _get_metric_from_line(metric_name, metric_line, exp_id):
         metric_parts = metric_line.strip().split(" ")
         if len(metric_parts) != 2 and len(metric_parts) != 3:
             raise MlflowException(
-                "Metric '%s' is malformed; persisted metric data contained %s "
-                "fields. Expected 2 or 3 fields." % (metric_name, len(metric_parts)),
+                f"Metric '{metric_name}' is malformed; persisted metric data contained "
+                f"{len(metric_parts)} fields. Expected 2 or 3 fields. "
+                f"Experiment id: {exp_id}",
                 databricks_pb2.INTERNAL_ERROR,
             )
         ts = int(metric_parts[0])
@@ -751,16 +821,19 @@ class FileStore(AbstractStore):
         """
         Return all logged values for a given metric.
 
-        :param run_id: Unique identifier for run
-        :param metric_key: Metric name within the run
-        :param max_results: An indicator for paginated results. This functionality is not
-            implemented for FileStore and is unused in this store's implementation.
-        :param page_token: An indicator for paginated results. This functionality is not
-            implemented for FileStore and if the value is overridden with a value other than
-            ``None``, an MlflowException will be thrown.
+        Args:
+            run_id: Unique identifier for run.
+            metric_key: Metric name within the run.
+            max_results: An indicator for paginated results. This functionality is not
+                implemented for FileStore and is unused in this store's implementation.
+            page_token: An indicator for paginated results. This functionality is not
+                implemented for FileStore and if the value is overridden with a value other than
+                ``None``, an MlflowException will be thrown.
 
-        :return: A List of :py:class:`mlflow.entities.Metric` entities if ``metric_key`` values
+        Returns:
+            A List of :py:class:`mlflow.entities.Metric` entities if ``metric_key`` values
             have been logged to the ``run_id``, else an empty list.
+
         """
         # NB: The FileStore does not currently support pagination for this API.
         # Raise if `page_token` is specified, as the functionality to support paged queries
@@ -781,7 +854,7 @@ class FileStore(AbstractStore):
             return PagedList([], None)
         return PagedList(
             [
-                FileStore._get_metric_from_line(metric_key, line)
+                FileStore._get_metric_from_line(metric_key, line, run_info.experiment_id)
                 for line in read_file_lines(parent_path, metric_key)
             ],
             None,
@@ -868,15 +941,26 @@ class FileStore(AbstractStore):
                 if LifecycleStage.matches_view_type(view_type, run_info.lifecycle_stage):
                     run_infos.append(run_info)
             except MissingConfigException as rnfe:
-                # trap malformed run exception and log warning
+                # trap malformed run exception and log
+                # this is at debug level because if the same store is used for
+                # artifact storage, it's common the folder is not a run folder
                 r_id = os.path.basename(r_dir)
-                logging.warning(
-                    "Malformed run '%s'. Detailed error %s", r_id, str(rnfe), exc_info=True
+                logging.debug(
+                    "Malformed run '%s'. Detailed error %s",
+                    r_id,
+                    str(rnfe),
+                    exc_info=True,
                 )
         return run_infos
 
     def _search_runs(
-        self, experiment_ids, filter_string, run_view_type, max_results, order_by, page_token
+        self,
+        experiment_ids,
+        filter_string,
+        run_view_type,
+        max_results,
+        order_by,
+        page_token,
     ):
         if max_results > SEARCH_MAX_RESULTS_THRESHOLD:
             raise MlflowException(
@@ -903,7 +987,7 @@ class FileStore(AbstractStore):
     def _log_run_metric(self, run_info, metric):
         metric_path = self._get_metric_path(run_info.experiment_id, run_info.run_id, metric.key)
         make_containing_dirs(metric_path)
-        append_to(metric_path, "{} {} {}\n".format(metric.timestamp, metric.value, metric.step))
+        append_to(metric_path, f"{metric.timestamp} {metric.value} {metric.step}\n")
 
     def _writeable_value(self, tag_value):
         if tag_value is None:
@@ -911,11 +995,11 @@ class FileStore(AbstractStore):
         elif is_string_type(tag_value):
             return tag_value
         else:
-            return "%s" % tag_value
+            return str(tag_value)
 
     def log_param(self, run_id, param):
         _validate_run_id(run_id)
-        _validate_param(param.key, param.value)
+        param = _validate_param(param.key, param.value)
         run_info = self._get_run_info(run_id)
         check_run_is_active(run_info)
         self._log_run_param(run_info, param)
@@ -955,15 +1039,16 @@ class FileStore(AbstractStore):
         """
         Set a tag for the specified experiment
 
-        :param experiment_id: String ID of the experiment
-        :param tag: ExperimentRunTag instance to log
+        Args:
+            experiment_id: String ID of the experiment
+            tag: ExperimentRunTag instance to log
         """
         _validate_tag_name(tag.key)
         experiment = self.get_experiment(experiment_id)
         if experiment.lifecycle_stage != LifecycleStage.ACTIVE:
             raise MlflowException(
-                "The experiment {} must be in the 'active'"
-                "lifecycle_stage to set tags".format(experiment.experiment_id),
+                f"The experiment {experiment.experiment_id} must be in the 'active' "
+                "lifecycle_stage to set tags",
                 error_code=databricks_pb2.INVALID_PARAMETER_VALUE,
             )
         tag_path = self._get_experiment_tag_path(experiment_id, tag.key)
@@ -989,8 +1074,10 @@ class FileStore(AbstractStore):
     def delete_tag(self, run_id, key):
         """
         Delete a tag from a run. This is irreversible.
-        :param run_id: String ID of the run
-        :param key: Name of the tag
+
+        Args:
+            run_id: String ID of the run.
+            key: Name of the tag.
         """
         _validate_run_id(run_id)
         run_info = self._get_run_info(run_id)
@@ -1012,7 +1099,7 @@ class FileStore(AbstractStore):
 
     def log_batch(self, run_id, metrics, params, tags):
         _validate_run_id(run_id)
-        _validate_batch_log_data(metrics, params, tags)
+        metrics, params, tags = _validate_batch_log_data(metrics, params, tags)
         _validate_batch_log_limits(metrics, params, tags)
         _validate_param_keys_unique(params)
         run_info = self._get_run_info(run_id)
@@ -1037,14 +1124,12 @@ class FileStore(AbstractStore):
 
         if not isinstance(mlflow_model, Model):
             raise TypeError(
-                "Argument 'mlflow_model' should be mlflow.models.Model, got '{}'".format(
-                    type(mlflow_model)
-                )
+                f"Argument 'mlflow_model' should be mlflow.models.Model, got '{type(mlflow_model)}'"
             )
         _validate_run_id(run_id)
         run_info = self._get_run_info(run_id)
         check_run_is_active(run_info)
-        model_dict = mlflow_model.to_dict()
+        model_dict = mlflow_model.get_tags_dict()
         run_info = self._get_run_info(run_id)
         path = self._get_tag_path(run_info.experiment_id, run_info.run_id, MLFLOW_LOGGED_MODELS)
         if os.path.exists(path):
@@ -1059,6 +1144,208 @@ class FileStore(AbstractStore):
         except Exception as e:
             raise MlflowException(e, INTERNAL_ERROR)
 
+    def log_inputs(self, run_id: str, datasets: Optional[list[DatasetInput]] = None):
+        """
+        Log inputs, such as datasets, to the specified run.
+
+        Args:
+            run_id: String id for the run
+            datasets: List of :py:class:`mlflow.entities.DatasetInput` instances to log
+                as inputs to the run.
+
+        Returns:
+            None.
+        """
+        _validate_run_id(run_id)
+        run_info = self._get_run_info(run_id)
+        check_run_is_active(run_info)
+
+        if datasets is None:
+            return
+
+        experiment_dir = self._get_experiment_path(run_info.experiment_id, assert_exists=True)
+        run_dir = self._get_run_dir(run_info.experiment_id, run_id)
+
+        for dataset_input in datasets:
+            dataset = dataset_input.dataset
+            dataset_id = FileStore._get_dataset_id(
+                dataset_name=dataset.name, dataset_digest=dataset.digest
+            )
+            dataset_dir = os.path.join(experiment_dir, FileStore.DATASETS_FOLDER_NAME, dataset_id)
+            if not os.path.exists(dataset_dir):
+                os.makedirs(dataset_dir, exist_ok=True)
+                write_yaml(dataset_dir, FileStore.META_DATA_FILE_NAME, dict(dataset))
+
+            input_id = FileStore._get_input_id(dataset_id=dataset_id, run_id=run_id)
+            input_dir = os.path.join(run_dir, FileStore.INPUTS_FOLDER_NAME, input_id)
+            if not os.path.exists(input_dir):
+                os.makedirs(input_dir, exist_ok=True)
+                fs_input = FileStore._FileStoreInput(
+                    source_type=InputVertexType.DATASET,
+                    source_id=dataset_id,
+                    destination_type=InputVertexType.RUN,
+                    destination_id=run_id,
+                    tags={tag.key: tag.value for tag in dataset_input.tags},
+                )
+                fs_input.write_yaml(input_dir, FileStore.META_DATA_FILE_NAME)
+
+    @staticmethod
+    def _get_dataset_id(dataset_name: str, dataset_digest: str) -> str:
+        md5 = hashlib.md5(dataset_name.encode("utf-8"), usedforsecurity=False)
+        md5.update(dataset_digest.encode("utf-8"))
+        return md5.hexdigest()
+
+    @staticmethod
+    def _get_input_id(dataset_id: str, run_id: str) -> str:
+        md5 = hashlib.md5(dataset_id.encode("utf-8"), usedforsecurity=False)
+        md5.update(run_id.encode("utf-8"))
+        return md5.hexdigest()
+
+    class _FileStoreInput(NamedTuple):
+        source_type: int
+        source_id: str
+        destination_type: int
+        destination_id: str
+        tags: dict[str, str]
+
+        def write_yaml(self, root: str, file_name: str):
+            dict_for_yaml = {
+                "source_type": InputVertexType.Name(self.source_type),
+                "source_id": self.source_id,
+                "destination_type": InputVertexType.Name(self.destination_type),
+                "destination_id": self.source_id,
+                "tags": self.tags,
+            }
+            write_yaml(root, file_name, dict_for_yaml)
+
+        @classmethod
+        def from_yaml(cls, root, file_name):
+            dict_from_yaml = FileStore._read_yaml(root, file_name)
+            return cls(
+                source_type=InputVertexType.Value(dict_from_yaml["source_type"]),
+                source_id=dict_from_yaml["source_id"],
+                destination_type=InputVertexType.Value(dict_from_yaml["destination_type"]),
+                destination_id=dict_from_yaml["destination_id"],
+                tags=dict_from_yaml["tags"],
+            )
+
+    def _get_all_inputs(self, run_info: RunInfo) -> RunInputs:
+        run_dir = self._get_run_dir(run_info.experiment_id, run_info.run_id)
+        inputs_parent_path = os.path.join(run_dir, FileStore.INPUTS_FOLDER_NAME)
+        experiment_dir = self._get_experiment_path(run_info.experiment_id, assert_exists=True)
+        datasets_parent_path = os.path.join(experiment_dir, FileStore.DATASETS_FOLDER_NAME)
+        if not os.path.exists(inputs_parent_path) or not os.path.exists(datasets_parent_path):
+            return RunInputs(dataset_inputs=[])
+
+        dataset_dirs = os.listdir(datasets_parent_path)
+        dataset_inputs = []
+        for input_dir in os.listdir(inputs_parent_path):
+            input_dir_full_path = os.path.join(inputs_parent_path, input_dir)
+            fs_input = FileStore._FileStoreInput.from_yaml(
+                input_dir_full_path, FileStore.META_DATA_FILE_NAME
+            )
+            if fs_input.source_type != InputVertexType.DATASET:
+                logging.warning(
+                    f"Encountered invalid run input source type '{fs_input.source_type}'. Skipping."
+                )
+                continue
+
+            matching_dataset_dirs = [d for d in dataset_dirs if d == fs_input.source_id]
+            if not matching_dataset_dirs:
+                logging.warning(
+                    f"Failed to find dataset with ID '{fs_input.source_id}' referenced as an input"
+                    f" of the run with ID '{run_info.run_id}'. Skipping."
+                )
+                continue
+            elif len(matching_dataset_dirs) > 1:
+                logging.warning(
+                    f"Found multiple datasets with ID '{fs_input.source_id}'. Using the first one."
+                )
+
+            dataset_dir = matching_dataset_dirs[0]
+            dataset = FileStore._get_dataset_from_dir(datasets_parent_path, dataset_dir)
+            dataset_input = DatasetInput(
+                dataset=dataset,
+                tags=[InputTag(key=key, value=value) for key, value in fs_input.tags.items()],
+            )
+            dataset_inputs.append(dataset_input)
+
+        return RunInputs(dataset_inputs=dataset_inputs)
+
+    def _search_datasets(self, experiment_ids) -> list[_DatasetSummary]:
+        """
+        Return all dataset summaries associated to the given experiments.
+
+        Args:
+            experiment_ids: List of experiment ids to scope the search
+
+        Returns:
+            A List of :py:class:`mlflow.entities.DatasetSummary` entities.
+
+        """
+
+        @dataclass(frozen=True)
+        class _SummaryTuple:
+            experiment_id: str
+            name: str
+            digest: str
+            context: str
+
+        MAX_DATASET_SUMMARIES_RESULTS = 1000
+        summaries = set()
+        for experiment_id in experiment_ids:
+            experiment_dir = self._get_experiment_path(experiment_id, assert_exists=True)
+            run_dirs = list_all(
+                experiment_dir,
+                filter_func=lambda x: all(
+                    os.path.basename(os.path.normpath(x)) != reservedFolderName
+                    for reservedFolderName in FileStore.RESERVED_EXPERIMENT_FOLDERS
+                )
+                and os.path.isdir(x),
+                full_path=True,
+            )
+            for run_dir in run_dirs:
+                run_info = self._get_run_info_from_dir(run_dir)
+                run_inputs = self._get_all_inputs(run_info)
+                for dataset_input in run_inputs.dataset_inputs:
+                    context = None
+                    for input_tag in dataset_input.tags:
+                        if input_tag.key == MLFLOW_DATASET_CONTEXT:
+                            context = input_tag.value
+                            break
+                    dataset = dataset_input.dataset
+                    summaries.add(
+                        _SummaryTuple(experiment_id, dataset.name, dataset.digest, context)
+                    )
+                    # If we reached MAX_DATASET_SUMMARIES_RESULTS entries, then return right away.
+                    if len(summaries) == MAX_DATASET_SUMMARIES_RESULTS:
+                        return [
+                            _DatasetSummary(
+                                experiment_id=summary.experiment_id,
+                                name=summary.name,
+                                digest=summary.digest,
+                                context=summary.context,
+                            )
+                            for summary in summaries
+                        ]
+
+        return [
+            _DatasetSummary(
+                experiment_id=summary.experiment_id,
+                name=summary.name,
+                digest=summary.digest,
+                context=summary.context,
+            )
+            for summary in summaries
+        ]
+
+    @staticmethod
+    def _get_dataset_from_dir(parent_path, dataset_dir) -> Dataset:
+        dataset_dict = FileStore._read_yaml(
+            os.path.join(parent_path, dataset_dir), FileStore.META_DATA_FILE_NAME
+        )
+        return Dataset.from_dictionary(dataset_dict)
+
     @staticmethod
     def _read_yaml(root, file_name, retries=2):
         """
@@ -1066,10 +1353,13 @@ class FileStore(AbstractStore):
         a specified number of times if the file contents are unexpectedly
         empty due to a concurrent write.
 
-        :param root: Directory name.
-        :param file_name: File name. Expects to have '.yaml' extension.
-        :param retries: The number of times to retry for unexpected empty content.
-        :return: Data in yaml file as dictionary
+        Args:
+            root: Directory name.
+            file_name: File name. Expects to have '.yaml' extension.
+            retries: The number of times to retry for unexpected empty content.
+
+        Returns:
+            Data in yaml file as dictionary.
         """
 
         def _read_helper(root, file_name, attempts_remaining=2):
@@ -1081,3 +1371,362 @@ class FileStore(AbstractStore):
                 return _read_helper(root, file_name, attempts_remaining - 1)
 
         return _read_helper(root, file_name, attempts_remaining=retries)
+
+    def _get_traces_artifact_dir(self, experiment_id, request_id):
+        return append_to_uri_path(
+            self.get_experiment(experiment_id).artifact_location,
+            FileStore.TRACES_FOLDER_NAME,
+            request_id,
+            FileStore.ARTIFACTS_FOLDER_NAME,
+        )
+
+    def start_trace(
+        self,
+        experiment_id: str,
+        timestamp_ms: int,
+        request_metadata: dict[str, str],
+        tags: dict[str, str],
+    ) -> TraceInfo:
+        """
+        Start an initial TraceInfo object in the backend store.
+
+        Args:
+            experiment_id: String id of the experiment for this run.
+            timestamp_ms: Start time of the trace, in milliseconds since the UNIX epoch.
+            request_metadata: Metadata of the trace.
+            tags: Tags of the trace.
+
+        Returns:
+            The created TraceInfo object.
+        """
+        request_id = generate_request_id()
+        _validate_experiment_id(experiment_id)
+        experiment_dir = self._get_experiment_path(
+            experiment_id, view_type=ViewType.ACTIVE_ONLY, assert_exists=True
+        )
+        mkdir(experiment_dir, FileStore.TRACES_FOLDER_NAME)
+        traces_dir = os.path.join(experiment_dir, FileStore.TRACES_FOLDER_NAME)
+        mkdir(traces_dir, request_id)
+        trace_dir = os.path.join(traces_dir, request_id)
+        artifact_uri = self._get_traces_artifact_dir(experiment_id, request_id)
+        tags.update({MLFLOW_ARTIFACT_LOCATION: artifact_uri})
+        trace_info = TraceInfo(
+            request_id=request_id,
+            experiment_id=experiment_id,
+            timestamp_ms=timestamp_ms,
+            execution_time_ms=None,
+            status=TraceStatus.IN_PROGRESS,
+            request_metadata=request_metadata,
+            tags=tags,
+        )
+        self._save_trace_info(trace_info, trace_dir)
+        return trace_info
+
+    def _save_trace_info(self, trace_info: TraceInfo, trace_dir, overwrite=False):
+        """
+        TraceInfo is saved into `traces` folder under the experiment, each trace
+        is saved in the folder named by its request_id.
+        `request_metadata` and `tags` folder store their key-value pairs such that each
+        key is the file name, and value is written as the string value.
+        Detailed directories structure is as below:
+        | - experiment_id
+        |   - traces
+        |     - request_id1
+        |       - trace_info.yaml
+        |       - request_metadata
+        |         - key
+        |       - tags
+        |     - request_id2
+        |     - ...
+        |   - run_id1 ...
+        |   - run_id2 ...
+        """
+        # Save basic trace info to TRACE_INFO_FILE_NAME
+        trace_info_dict = self._convert_trace_info_to_dict(trace_info)
+        write_yaml(
+            trace_dir,
+            FileStore.TRACE_INFO_FILE_NAME,
+            trace_info_dict,
+            overwrite=overwrite,
+        )
+        # Save request_metadata to its own folder
+        self._write_dict_to_trace_sub_folder(
+            trace_dir,
+            FileStore.TRACE_REQUEST_METADATA_FOLDER_NAME,
+            trace_info.request_metadata,
+        )
+        # Save tags to its own folder
+        self._write_dict_to_trace_sub_folder(
+            trace_dir, FileStore.TRACE_TAGS_FOLDER_NAME, trace_info.tags
+        )
+
+    def _convert_trace_info_to_dict(self, trace_info: TraceInfo):
+        """
+        Convert trace info to a dictionary for persistence.
+        Drop request_metadata and tags as they're saved into separate files.
+        """
+        trace_info_dict = trace_info.to_dict()
+        trace_info_dict.pop("request_metadata", None)
+        trace_info_dict.pop("tags", None)
+        return trace_info_dict
+
+    def _write_dict_to_trace_sub_folder(self, trace_dir, sub_folder, dictionary):
+        mkdir(trace_dir, sub_folder)
+        for key, value in dictionary.items():
+            # always validate as tag name to make sure the file name is valid
+            _validate_tag_name(key)
+            tag_path = os.path.join(trace_dir, sub_folder, key)
+            # value are written as strings
+            write_to(tag_path, self._writeable_value(value))
+
+    def _get_dict_from_trace_sub_folder(self, trace_dir, sub_folder):
+        parent_path, files = self._get_resource_files(trace_dir, sub_folder)
+        dictionary = {}
+        for file_name in files:
+            _validate_tag_name(file_name)
+            value = read_file(parent_path, file_name)
+            dictionary[file_name] = value
+        return dictionary
+
+    def end_trace(
+        self,
+        request_id: str,
+        timestamp_ms: int,
+        status: TraceStatus,
+        request_metadata: dict[str, str],
+        tags: dict[str, str],
+    ) -> TraceInfo:
+        """
+        Update the TraceInfo object in the backend store with the completed trace info.
+
+        Args:
+            request_id : Unique string identifier of the trace.
+            timestamp_ms: End time of the trace, in milliseconds. The execution time field
+                in the TraceInfo will be calculated by subtracting the start time from this.
+            status: Status of the trace.
+            request_metadata: Metadata of the trace. This will be merged with the existing
+                metadata logged during the start_trace call.
+            tags: Tags of the trace. This will be merged with the existing tags logged
+                during the start_trace or set_trace_tag calls.
+
+        Returns:
+            The updated TraceInfo object.
+        """
+        trace_info, trace_dir = self._get_trace_info_and_dir(request_id)
+        trace_info.execution_time_ms = timestamp_ms - trace_info.timestamp_ms
+        trace_info.status = status
+        trace_info.request_metadata.update(request_metadata)
+        trace_info.tags.update(tags)
+        self._save_trace_info(trace_info, trace_dir, overwrite=True)
+        return trace_info
+
+    def get_trace_info(self, request_id: str, should_query_v3: bool = False) -> TraceInfo:
+        """
+        Get the trace matching the `request_id`.
+
+        Args:
+            request_id: String id of the trace to fetch.
+            should_query_v3: If True, the backend store will query the V3 API for the trace info.
+                TODO: Remove this flag once the V3 API is the default in OSS.
+
+        Returns:
+            The fetched Trace object, of type ``mlflow.entities.TraceInfo``.
+        """
+        if should_query_v3:
+            raise MlflowException.invalid_parameter_value(
+                "GetTraceInfoV3 API is not supported in the FileStore backend.",
+            )
+
+        return self._get_trace_info_and_dir(request_id)[0]
+
+    def _get_trace_info_and_dir(self, request_id: str) -> tuple[TraceInfo, str]:
+        trace_dir = self._find_trace_dir(request_id, assert_exists=True)
+        trace_info = self._get_trace_info_from_dir(trace_dir)
+        if trace_info and trace_info.request_id != request_id:
+            raise MlflowException(
+                f"Trace with request ID '{request_id}' metadata is in invalid state.",
+                databricks_pb2.INVALID_STATE,
+            )
+        return trace_info, trace_dir
+
+    def _find_trace_dir(self, request_id, assert_exists=False):
+        self._check_root_dir()
+        all_experiments = self._get_active_experiments(True) + self._get_deleted_experiments(True)
+        for experiment_dir in all_experiments:
+            traces_dir = os.path.join(experiment_dir, FileStore.TRACES_FOLDER_NAME)
+            if exists(traces_dir):
+                if traces := find(traces_dir, request_id, full_path=True):
+                    return traces[0]
+        if assert_exists:
+            raise MlflowException(
+                f"Trace with request ID '{request_id}' not found",
+                RESOURCE_DOES_NOT_EXIST,
+            )
+
+    def _get_trace_info_from_dir(self, trace_dir) -> Optional[TraceInfo]:
+        if not os.path.exists(os.path.join(trace_dir, FileStore.TRACE_INFO_FILE_NAME)):
+            return None
+        trace_info_dict = FileStore._read_yaml(trace_dir, FileStore.TRACE_INFO_FILE_NAME)
+        trace_info = TraceInfo.from_dict(trace_info_dict)
+        trace_info.request_metadata = self._get_dict_from_trace_sub_folder(
+            trace_dir, FileStore.TRACE_REQUEST_METADATA_FOLDER_NAME
+        )
+        trace_info.tags = self._get_dict_from_trace_sub_folder(
+            trace_dir, FileStore.TRACE_TAGS_FOLDER_NAME
+        )
+        return trace_info
+
+    def set_trace_tag(self, request_id: str, key: str, value: str):
+        """
+        Set a tag on the trace with the given request_id.
+
+        Args:
+            request_id: The ID of the trace.
+            key: The string key of the tag.
+            value: The string value of the tag.
+        """
+        trace_dir = self._find_trace_dir(request_id, assert_exists=True)
+        self._write_dict_to_trace_sub_folder(
+            trace_dir, FileStore.TRACE_TAGS_FOLDER_NAME, {key: value}
+        )
+
+    def delete_trace_tag(self, request_id: str, key: str):
+        """
+        Delete a tag on the trace with the given request_id.
+
+        Args:
+            request_id: The ID of the trace.
+            key: The string key of the tag.
+        """
+        _validate_tag_name(key)
+        trace_dir = self._find_trace_dir(request_id, assert_exists=True)
+        tag_path = os.path.join(trace_dir, FileStore.TRACE_TAGS_FOLDER_NAME, key)
+        if not exists(tag_path):
+            raise MlflowException(
+                f"No tag with name: {key} in trace with request_id {request_id}.",
+                RESOURCE_DOES_NOT_EXIST,
+            )
+        os.remove(tag_path)
+
+    def _delete_traces(
+        self,
+        experiment_id: str,
+        max_timestamp_millis: Optional[int] = None,
+        max_traces: Optional[int] = None,
+        request_ids: Optional[list[str]] = None,
+    ) -> int:
+        """
+        Delete traces based on the specified criteria.
+
+        - Either `max_timestamp_millis` or `request_ids` must be specified, but not both.
+        - `max_traces` can't be specified if `request_ids` is specified.
+
+        Args:
+            experiment_id: ID of the associated experiment.
+            max_timestamp_millis: The maximum timestamp in milliseconds since the UNIX epoch for
+                deleting traces. Traces older than or equal to this timestamp will be deleted.
+            max_traces: The maximum number of traces to delete. If max_traces is specified, and
+                it is less than the number of traces that would be deleted based on the
+                max_timestamp_millis, the oldest traces will be deleted first.
+            request_ids: A set of request IDs to delete.
+
+        Returns:
+            The number of traces deleted.
+        """
+        experiment_path = self._get_experiment_path(experiment_id, assert_exists=True)
+        traces_path = os.path.join(experiment_path, FileStore.TRACES_FOLDER_NAME)
+        deleted_traces = 0
+        if max_timestamp_millis:
+            trace_paths = list_all(traces_path, lambda x: os.path.isdir(x), full_path=True)
+            trace_info_and_paths = []
+            for trace_path in trace_paths:
+                try:
+                    trace_info = self._get_trace_info_from_dir(trace_path)
+                    if trace_info and trace_info.timestamp_ms <= max_timestamp_millis:
+                        trace_info_and_paths.append((trace_info, trace_path))
+                except MissingConfigException as e:
+                    # trap malformed trace exception and log warning
+                    request_id = os.path.basename(trace_path)
+                    _logger.warning(
+                        f"Malformed trace with request_id '{request_id}'. Detailed error {e}",
+                        exc_info=_logger.isEnabledFor(logging.DEBUG),
+                    )
+            trace_info_and_paths.sort(key=lambda x: x[0].timestamp_ms)
+            # if max_traces is not None then it must > 0
+            deleted_traces = min(len(trace_info_and_paths), max_traces or len(trace_info_and_paths))
+            trace_info_and_paths = trace_info_and_paths[:deleted_traces]
+            for _, trace_path in trace_info_and_paths:
+                shutil.rmtree(trace_path)
+            return deleted_traces
+        if request_ids:
+            for request_id in request_ids:
+                trace_path = os.path.join(traces_path, request_id)
+                # Do not throw if the trace doesn't exist
+                if exists(trace_path):
+                    shutil.rmtree(trace_path)
+                    deleted_traces += 1
+            return deleted_traces
+
+    def search_traces(
+        self,
+        experiment_ids: list[str],
+        filter_string: Optional[str] = None,
+        max_results: int = SEARCH_TRACES_DEFAULT_MAX_RESULTS,
+        order_by: Optional[list[str]] = None,
+        page_token: Optional[str] = None,
+    ):
+        """
+        Return traces that match the given list of search expressions within the experiments.
+
+        Args:
+            experiment_ids: List of experiment ids to scope the search.
+            filter_string: A search filter string. Supported filter keys are `name`,
+                           `status`, `timestamp_ms` and `tags`.
+            max_results: Maximum number of traces desired.
+            order_by: List of order_by clauses. Supported sort key is `timestamp_ms`. By default
+                      we sort by timestamp_ms DESC.
+            page_token: Token specifying the next page of results. It should be obtained from
+                a ``search_traces`` call.
+
+        Returns:
+            A tuple of a list of :py:class:`TraceInfo <mlflow.entities.TraceInfo>` objects that
+            satisfy the search expressions and a pagination token for the next page of results.
+            If the underlying tracking store supports pagination, the token for the
+            next page may be obtained via the ``token`` attribute of the returned object; however,
+            some store implementations may not support pagination and thus the returned token would
+            not be meaningful in such cases.
+        """
+        if max_results > SEARCH_MAX_RESULTS_THRESHOLD:
+            raise MlflowException(
+                "Invalid value for request parameter max_results. It must be at "
+                f"most {SEARCH_MAX_RESULTS_THRESHOLD}, but got value {max_results}",
+                INVALID_PARAMETER_VALUE,
+            )
+        traces = []
+        for experiment_id in experiment_ids:
+            trace_infos = self._list_trace_infos(experiment_id)
+            traces.extend(trace_infos)
+        filtered = SearchTraceUtils.filter(traces, filter_string)
+        sorted_traces = SearchTraceUtils.sort(filtered, order_by)
+        traces, next_page_token = SearchTraceUtils.paginate(sorted_traces, page_token, max_results)
+        return traces, next_page_token
+
+    def _list_trace_infos(self, experiment_id):
+        experiment_path = self._get_experiment_path(experiment_id, assert_exists=True)
+        traces_path = os.path.join(experiment_path, FileStore.TRACES_FOLDER_NAME)
+        if not os.path.exists(traces_path):
+            return []
+        trace_paths = list_all(traces_path, lambda x: os.path.isdir(x), full_path=True)
+        trace_infos = []
+        for trace_path in trace_paths:
+            try:
+                if trace_info := self._get_trace_info_from_dir(trace_path):
+                    trace_infos.append(trace_info)
+            except MissingConfigException as e:
+                # trap malformed trace exception and log warning
+                request_id = os.path.basename(trace_path)
+                logging.warning(
+                    f"Malformed trace with request_id '{request_id}'. Detailed error {e}",
+                    exc_info=_logger.isEnabledFor(logging.DEBUG),
+                )
+        return trace_infos

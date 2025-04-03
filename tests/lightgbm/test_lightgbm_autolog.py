@@ -1,25 +1,27 @@
-import os
-import json
 import functools
+import json
+import os
 import pickle
-import pytest
-import yaml
-import numpy as np
-import pandas as pd
+from unittest import mock
+from unittest.mock import patch
+
 import lightgbm as lgb
 import matplotlib as mpl
+import numpy as np
+import pandas as pd
+import pytest
+import yaml
 from packaging.version import Version
 from sklearn import datasets
-from unittest import mock
 
 import mlflow
 import mlflow.lightgbm
+from mlflow import MlflowClient
 from mlflow.lightgbm import _autolog_callback
 from mlflow.models import Model
 from mlflow.models.utils import _read_example
-from mlflow import MlflowClient
-from mlflow.utils.autologging_utils import picklable_exception_safe_function, BatchMetricsLogger
-from unittest.mock import patch
+from mlflow.types.utils import _infer_schema
+from mlflow.utils.autologging_utils import BatchMetricsLogger, picklable_exception_safe_function
 
 mpl.use("Agg")
 
@@ -51,10 +53,28 @@ def train_set():
     return lgb.Dataset(X, y, free_raw_data=False)
 
 
+@pytest.fixture(scope="module")
+def valid_set():
+    iris = datasets.load_iris()
+    X = pd.DataFrame(iris.data[:, :2] * 2, columns=iris.feature_names[:2])
+    y = iris.target
+    # set free_raw_data False to use raw data later.
+    return lgb.Dataset(X, y, free_raw_data=False)
+
+
 def test_lgb_autolog_ends_auto_created_run(bst_params, train_set):
     mlflow.lightgbm.autolog()
     lgb.train(bst_params, train_set, num_boost_round=1)
     assert mlflow.active_run() is None
+
+
+def test_extra_tags_lightgbm_autolog(bst_params, train_set):
+    mlflow.lightgbm.autolog(extra_tags={"test_tag": "lgb_autolog"})
+    lgb.train(bst_params, train_set, num_boost_round=1)
+
+    run = mlflow.last_active_run()
+    assert run.data.tags["test_tag"] == "lgb_autolog"
+    assert run.data.tags[mlflow.utils.mlflow_tags.MLFLOW_AUTOLOGGING] == "lightgbm"
 
 
 def test_lgb_autolog_persists_manually_created_run(bst_params, train_set):
@@ -73,8 +93,6 @@ def test_lgb_autolog_logs_default_params(bst_params, train_set):
 
     expected_params = {
         "num_boost_round": 100,
-        "feature_name": "auto",
-        "categorical_feature": "auto",
         "keep_training_booster": False,
     }
     if Version(lgb.__version__) <= Version("3.3.1"):
@@ -83,10 +101,14 @@ def test_lgb_autolog_logs_default_params(bst_params, train_set):
         expected_params["verbose_eval"] = (
             # The default value of `verbose_eval` in `lightgbm.train` has been changed to 'warn'
             # in this PR: https://github.com/microsoft/LightGBM/pull/4577
-            "warn"
-            if Version(lgb.__version__) > Version("3.2.1")
-            else True
+            "warn" if Version(lgb.__version__) > Version("3.2.1") else True
         )
+    if Version(lgb.__version__) <= Version("4.5.0"):
+        # these params were removed in this PR:
+        # https://github.com/microsoft/LightGBM/pull/6706
+        expected_params["feature_name"] = "auto"
+        expected_params["categorical_feature"] = "auto"
+
     expected_params.update(bst_params)
 
     for key, val in expected_params.items():
@@ -217,8 +239,9 @@ def test_lgb_autolog_with_sklearn_outputs_do_not_reflect_training_dataset_mutati
         X["TESTCOL"] = 5
         return original_lgb_classifier_predict(self, *args, **kwargs)
 
-    with mock.patch("lightgbm.LGBMClassifier.fit", patched_lgb_classifier_fit), mock.patch(
-        "lightgbm.LGBMClassifier.predict", patched_lgb_classifier_predict
+    with (
+        mock.patch("lightgbm.LGBMClassifier.fit", patched_lgb_classifier_fit),
+        mock.patch("lightgbm.LGBMClassifier.predict", patched_lgb_classifier_predict),
     ):
         mlflow.lightgbm.autolog(log_models=True, log_model_signatures=True, log_input_examples=True)
 
@@ -345,7 +368,7 @@ def test_lgb_autolog_logs_metrics_with_multi_metrics(bst_params, train_set):
     data = run.data
     client = MlflowClient()
     for metric_name in params["metric"]:
-        metric_key = "{}-{}".format(valid_names[0], metric_name)
+        metric_key = f"{valid_names[0]}-{metric_name}"
         metric_history = [x.value for x in client.get_metric_history(run.info.run_id, metric_key)]
         assert metric_key in data.metrics
         assert len(metric_history) == 10
@@ -635,8 +658,8 @@ def test_lgb_autolog_infers_model_signature_correctly(bst_params):
 
     assert "inputs" in signature
     assert json.loads(signature["inputs"]) == [
-        {"name": "sepal length (cm)", "type": "double"},
-        {"name": "sepal width (cm)", "type": "double"},
+        {"name": "sepal length (cm)", "type": "double", "required": True},
+        {"name": "sepal width (cm)", "type": "double", "required": True},
     ]
 
     assert "outputs" in signature
@@ -645,17 +668,18 @@ def test_lgb_autolog_infers_model_signature_correctly(bst_params):
     ]
 
 
-def test_lgb_autolog_continues_logging_even_if_signature_inference_fails(tmpdir):
-    tmp_csv = tmpdir.join("data.csv")
-    tmp_csv.write("2,6.4,2.8,5.6,2.2\n")
-    tmp_csv.write("1,5.0,2.3,3.3,1.0\n")
-    tmp_csv.write("2,4.9,2.5,4.5,1.7\n")
-    tmp_csv.write("0,4.9,3.1,1.5,0.1\n")
-    tmp_csv.write("0,5.7,3.8,1.7,0.3\n")
+def test_lgb_autolog_continues_logging_even_if_signature_inference_fails(tmp_path):
+    tmp_csv = tmp_path.joinpath("data.csv")
+    with tmp_csv.open("w") as f:
+        f.write("2,6.4,2.8,5.6,2.2\n")
+        f.write("1,5.0,2.3,3.3,1.0\n")
+        f.write("2,4.9,2.5,4.5,1.7\n")
+        f.write("0,4.9,3.1,1.5,0.1\n")
+        f.write("0,5.7,3.8,1.7,0.3\n")
 
     # signature and input example inference should fail here since the dataset is given
     #   as a file path
-    dataset = lgb.Dataset(tmp_csv.strpath)
+    dataset = lgb.Dataset(str(tmp_csv))
 
     bst_params = {
         "objective": "multiclass",
@@ -759,3 +783,60 @@ def test_lgb_api_autolog_registering_model(bst_params, train_set):
 
         registered_model = MlflowClient().get_registered_model(registered_model_name)
         assert registered_model.name == registered_model_name
+
+
+@pytest.mark.parametrize("log_datasets", [True, False])
+def test_lgb_log_datasets(bst_params, train_set, log_datasets):
+    with mlflow.start_run() as run:
+        mlflow.lightgbm.autolog(log_datasets=log_datasets)
+        lgb.train(bst_params, train_set, num_boost_round=1)
+
+    run_id = run.info.run_id
+    client = MlflowClient()
+    dataset_inputs = client.get_run(run_id).inputs.dataset_inputs
+    if log_datasets:
+        assert len(dataset_inputs) == 1
+        assert dataset_inputs[0].dataset.schema == json.dumps(
+            {"mlflow_colspec": _infer_schema(train_set.data).to_dict()}
+        )
+    else:
+        assert len(dataset_inputs) == 0
+
+
+def test_lgb_log_datasets_with_valid_set(bst_params, train_set, valid_set):
+    with mlflow.start_run() as run:
+        mlflow.lightgbm.autolog(log_datasets=True)
+        lgb.train(bst_params, train_set, valid_sets=[valid_set], num_boost_round=1)
+
+    run_id = run.info.run_id
+    client = MlflowClient()
+    dataset_inputs = client.get_run(run_id).inputs.dataset_inputs
+    assert len(dataset_inputs) == 2
+    assert dataset_inputs[0].tags[0].value == "train"
+    assert dataset_inputs[0].dataset.schema == json.dumps(
+        {"mlflow_colspec": _infer_schema(train_set.data).to_dict()}
+    )
+    assert dataset_inputs[1].tags[0].value == "eval"
+    assert dataset_inputs[1].dataset.schema == json.dumps(
+        {"mlflow_colspec": _infer_schema(valid_set.data).to_dict()}
+    )
+
+
+def test_lgb_log_datasets_with_valid_set_with_name(bst_params, train_set, valid_set):
+    with mlflow.start_run() as run:
+        mlflow.lightgbm.autolog(log_datasets=True)
+        lgb.train(
+            bst_params,
+            train_set,
+            valid_sets=[valid_set],
+            valid_names=["my_valid_set"],
+            num_boost_round=1,
+        )
+
+    run_id = run.info.run_id
+    client = MlflowClient()
+    dataset_inputs = client.get_run(run_id).inputs.dataset_inputs
+    assert len(dataset_inputs) == 2
+    assert dataset_inputs[0].tags[0].value == "train"
+    assert dataset_inputs[1].tags[0].value == "eval"
+    assert dataset_inputs[1].dataset.name == "my_valid_set"

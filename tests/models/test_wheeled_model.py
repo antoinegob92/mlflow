@@ -1,31 +1,35 @@
-import json
+import os
+import random
+import re
 from collections import namedtuple
 
+import numpy as np
+import pandas as pd
 import pytest
-from sklearn import datasets
 import sklearn.neighbors as knn
 import yaml
+from sklearn import datasets
+
 import mlflow
-import random
-import os
-import re
-import pandas as pd
-import numpy as np
-from mlflow.models.wheeled_model import WheeledModel, _WHEELS_FOLDER_NAME
-from mlflow.pyfunc.model import Model, MLMODEL_FILE_NAME
-from mlflow.exceptions import MlflowException
-from mlflow.tracking.artifact_utils import _download_artifact_from_uri
-from mlflow.utils.environment import _is_pip_deps, _mlflow_conda_env
 import mlflow.pyfunc.scoring_server as pyfunc_scoring_server
+from mlflow.exceptions import MlflowException
+from mlflow.models.model import METADATA_FILES
+from mlflow.models.utils import load_serving_example
+from mlflow.models.wheeled_model import _ORIGINAL_REQ_FILE_NAME, _WHEELS_FOLDER_NAME, WheeledModel
+from mlflow.pyfunc.model import MLMODEL_FILE_NAME, Model
 from mlflow.store.artifact.utils.models import _improper_model_uri_msg
+from mlflow.tracking.artifact_utils import _download_artifact_from_uri
 from mlflow.utils.environment import (
     _CONDA_ENV_FILE_NAME,
     _REQUIREMENTS_FILE_NAME,
+    _is_pip_deps,
+    _mlflow_conda_env,
 )
+
 from tests.helper_functions import (
-    pyfunc_serve_and_score_model,
     _is_available_on_pypi,
     _mlflow_major_version_string,
+    pyfunc_serve_and_score_model,
 )
 
 EXTRA_PYFUNC_SERVING_TEST_ARGS = (
@@ -103,9 +107,10 @@ def validate_updated_conda_dependencies(original_model_path, wheeled_model_path)
     wheeled_model_path = os.path.join(wheeled_model_path, _CONDA_ENV_FILE_NAME)
     original_conda_env_path = os.path.join(original_model_path, _CONDA_ENV_FILE_NAME)
 
-    with open(wheeled_model_path) as wheeled_conda_env, open(
-        original_conda_env_path
-    ) as original_conda_env:
+    with (
+        open(wheeled_model_path) as wheeled_conda_env,
+        open(original_conda_env_path) as original_conda_env,
+    ):
         wheeled_conda_env = yaml.safe_load(wheeled_conda_env)
         original_conda_env = yaml.safe_load(original_conda_env)
 
@@ -149,8 +154,8 @@ def test_model_log_load(tmp_path, sklearn_knn_model):
     # Log a model
     with mlflow.start_run():
         mlflow.sklearn.log_model(
-            sk_model=sklearn_knn_model.model,
-            artifact_path=artifact_path,
+            sklearn_knn_model.model,
+            artifact_path,
             registered_model_name=model_name,
         )
         model_path = _download_artifact_from_uri(model_uri, tmp_path)
@@ -185,8 +190,8 @@ def test_model_save_load(tmp_path, sklearn_knn_model):
     # Log a model
     with mlflow.start_run():
         mlflow.sklearn.log_model(
-            sk_model=sklearn_knn_model.model,
-            artifact_path=artifact_path,
+            sklearn_knn_model.model,
+            artifact_path,
             registered_model_name=model_name,
         )
         model_path = _download_artifact_from_uri(model_uri, model_download_path)
@@ -216,8 +221,8 @@ def test_logging_and_saving_wheeled_model_throws(tmp_path, sklearn_knn_model):
     # Log a model
     with mlflow.start_run():
         mlflow.sklearn.log_model(
-            sk_model=sklearn_knn_model.model,
-            artifact_path=artifact_path,
+            sklearn_knn_model.model,
+            artifact_path,
             registered_model_name=model_name,
         )
 
@@ -324,22 +329,87 @@ def test_serving_wheeled_model(sklearn_knn_model):
 
     # Log a model
     with mlflow.start_run():
-        mlflow.sklearn.log_model(
-            sk_model=model,
-            artifact_path=artifact_path,
+        model_info = mlflow.sklearn.log_model(
+            model,
+            artifact_path,
             registered_model_name=model_name,
+            input_example=pd.DataFrame(inference_data),
         )
 
     # Re-log with wheels
     with mlflow.start_run():
         WheeledModel.log_model(model_uri=model_uri)
 
-    data = json.dumps({"dataframe_split": pd.DataFrame(inference_data).to_dict(orient="split")})
+    inference_payload = load_serving_example(model_info.model_uri)
     resp = pyfunc_serve_and_score_model(
         wheeled_model_uri,
-        data=data,
+        data=inference_payload,
         content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON,
         extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
     )
     scores = pd.read_json(resp.content.decode("utf-8"), orient="records").values.squeeze()
     np.testing.assert_array_almost_equal(scores, model.predict(inference_data))
+
+
+def test_wheel_download_works(tmp_path):
+    simple_dependency = "cloudpickle"
+    requirements_file = os.path.join(tmp_path, "req.txt")
+    wheel_dir = os.path.join(tmp_path, "wheels")
+    with open(requirements_file, "w") as req_file:
+        req_file.write(simple_dependency)
+
+    WheeledModel._download_wheels(requirements_file, wheel_dir)
+    wheels = os.listdir(wheel_dir)
+    assert len(wheels) == 1  # Only a single wheel is downloaded
+    assert wheels[0].endswith(".whl")  # Type is wheel
+    assert simple_dependency in wheels[0]  # Cloudpickle wheel downloaded
+
+
+def test_wheel_download_override_option_works(tmp_path, monkeypatch):
+    dependency = "pyspark"
+    requirements_file = os.path.join(tmp_path, "req.txt")
+    wheel_dir = os.path.join(tmp_path, "wheels")
+    with open(requirements_file, "w") as req_file:
+        req_file.write(dependency)
+
+    # Default option fails to download wheel
+    with pytest.raises(
+        MlflowException, match="An error occurred while downloading the dependency wheels"
+    ):
+        WheeledModel._download_wheels(requirements_file, wheel_dir)
+
+    # Set option override
+    monkeypatch.setenv("MLFLOW_WHEELED_MODEL_PIP_DOWNLOAD_OPTIONS", "--prefer-binary")
+    WheeledModel._download_wheels(requirements_file, wheel_dir)
+    assert len(os.listdir(wheel_dir))  # Wheel dir is not empty
+
+
+def test_wheel_download_dependency_conflicts(tmp_path):
+    reqs_file = tmp_path / "requirements.txt"
+    reqs_file.write_text("mlflow==2.15.0\nmlflow==2.16.0")
+    with pytest.raises(
+        MlflowException,
+        # Ensure the error message contains conflict details
+        match=r"Cannot install mlflow==2\.15\.0 and mlflow==2\.16\.0.+The conflict is caused by",
+    ):
+        WheeledModel._download_wheels(reqs_file, tmp_path / "wheels")
+
+
+def test_copy_metadata(mock_is_in_databricks, sklearn_knn_model):
+    with mlflow.start_run():
+        mlflow.sklearn.log_model(
+            sklearn_knn_model.model,
+            "model",
+            registered_model_name="sklearn_knn_model",
+        )
+
+    with mlflow.start_run():
+        model_info = WheeledModel.log_model(model_uri="models:/sklearn_knn_model/1")
+
+    artifact_path = mlflow.artifacts.download_artifacts(model_info.model_uri)
+    metadata_path = os.path.join(artifact_path, "metadata")
+    if mock_is_in_databricks.return_value:
+        assert set(os.listdir(metadata_path)) == set(METADATA_FILES + [_ORIGINAL_REQ_FILE_NAME])
+    else:
+        assert not os.path.exists(metadata_path)
+    assert mock_is_in_databricks.call_count == 2

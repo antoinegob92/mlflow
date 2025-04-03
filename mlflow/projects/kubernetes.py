@@ -1,19 +1,17 @@
 import logging
-import docker
-import time
 import os
-from threading import RLock
+import time
 from datetime import datetime
+from shlex import quote, split
+from threading import RLock
 
 import kubernetes
 from kubernetes.config.config_exception import ConfigException
 
+import docker
+from mlflow.entities import RunStatus
 from mlflow.exceptions import ExecutionException
 from mlflow.projects.submitted_run import SubmittedRun
-from mlflow.entities import RunStatus
-
-from shlex import split
-from shlex import quote
 
 _logger = logging.getLogger(__name__)
 
@@ -94,9 +92,11 @@ class KubernetesSubmittedRun(SubmittedRun):
     """
     Instance of SubmittedRun corresponding to a Kubernetes Job run launched to run an MLflow
     project.
-    :param mlflow_run_id: ID of the MLflow project run.
-    :param job_name: Kubernetes job name.
-    :param job_namespace: Kubernetes job namespace.
+
+    Args:
+        mlflow_run_id: ID of the MLflow project run.
+        job_name: Kubernetes job name.
+        job_namespace: Kubernetes job namespace.
     """
 
     # How often to poll run status when waiting on a run

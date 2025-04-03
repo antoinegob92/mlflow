@@ -44,25 +44,25 @@ sudo apt clean
 df -h
 
 python --version
-pip install --upgrade pip wheel
+pip install --upgrade pip "wheel<0.46"
 pip --version
 
 if [[ "$SKINNY" == "true" ]]; then
-  MLFLOW_SKINNY=true pip install . --upgrade
+  pip install ./skinny
 else
   pip install .[extras] --upgrade
 fi
-export MLFLOW_HOME=$(pwd)
 
 req_files=""
 # Install Python test dependencies only if we're running Python tests
+if [[ "$ML" == "true" ]]; then
+  req_files+=" -r requirements/extra-ml-requirements.txt"
+fi
+
 if [[ "$SKINNY" == "true" ]]; then
   req_files+=" -r requirements/skinny-test-requirements.txt"
 else
   req_files+=" -r requirements/test-requirements.txt"
-fi
-if [[ "$ML" == "true" ]]; then
-  req_files+=" -r requirements/extra-ml-requirements.txt"
 fi
 
 if [[ ! -z $req_files ]]; then
@@ -73,9 +73,8 @@ fi
 pip install --no-dependencies tests/resources/mlflow-test-plugin
 
 # Print current environment info
-python dev/show_package_release_dates.py
+pip install aiohttp
 which mlflow
-echo $MLFLOW_HOME
 
 # Print mlflow version
 mlflow --version

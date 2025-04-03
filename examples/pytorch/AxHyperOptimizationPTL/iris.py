@@ -1,11 +1,7 @@
-# pylint: disable=arguments-differ
-# pylint: disable=unused-argument
-# pylint: disable=abstract-method
-
 import pytorch_lightning as pl
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 try:
     from torchmetrics import Accuracy

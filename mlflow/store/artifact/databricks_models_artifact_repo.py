@@ -1,22 +1,36 @@
-import logging
 import json
+import logging
+import os
+import posixpath
+from typing import Optional
 
 import mlflow.tracking
 from mlflow.entities import FileInfo
+from mlflow.environment_variables import (
+    MLFLOW_ENABLE_MULTIPART_DOWNLOAD,
+    MLFLOW_MULTIPART_DOWNLOAD_CHUNK_SIZE,
+)
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 from mlflow.store.artifact.artifact_repo import ArtifactRepository
-from mlflow.utils.databricks_utils import get_databricks_host_creds
-from mlflow.utils.file_utils import download_file_using_http_uri
-from mlflow.utils.rest_utils import http_request
-from mlflow.utils.uri import get_databricks_profile_uri_from_artifact_uri
 from mlflow.store.artifact.utils.models import (
     get_model_name_and_version,
     is_using_databricks_registry,
 )
+from mlflow.utils.databricks_utils import (
+    get_databricks_host_creds,
+    warn_on_deprecated_cross_workspace_registry_uri,
+)
+from mlflow.utils.file_utils import (
+    download_chunk_retries,
+    download_file_using_http_uri,
+    parallelized_download_file_using_http_uri,
+    remove_on_error,
+)
+from mlflow.utils.rest_utils import http_request
+from mlflow.utils.uri import get_databricks_profile_uri_from_artifact_uri
 
 _logger = logging.getLogger(__name__)
-_DOWNLOAD_CHUNK_SIZE = 100000000
 # The constant REGISTRY_LIST_ARTIFACT_ENDPOINT is defined as @developer_stable
 REGISTRY_LIST_ARTIFACTS_ENDPOINT = "/api/2.0/mlflow/model-versions/list-artifacts"
 # The constant REGISTRY_ARTIFACT_PRESIGNED_URI_ENDPOINT is defined as @developer_stable
@@ -52,8 +66,14 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
         self.databricks_profile_uri = (
             get_databricks_profile_uri_from_artifact_uri(artifact_uri) or mlflow.get_registry_uri()
         )
+        warn_on_deprecated_cross_workspace_registry_uri(self.databricks_profile_uri)
         client = MlflowClient(registry_uri=self.databricks_profile_uri)
         self.model_name, self.model_version = get_model_name_and_version(client, artifact_uri)
+        # Use an isolated thread pool executor for chunk uploads/downloads to avoid a deadlock
+        # caused by waiting for a chunk-upload/download task within a file-upload/download task.
+        # See https://superfastpython.com/threadpoolexecutor-deadlock/#Deadlock_1_Submit_and_Wait_for_a_Task_Within_a_Task
+        # for more details
+        self.chunk_thread_pool = self._create_thread_pool()
 
     def _call_endpoint(self, json, endpoint):
         db_creds = get_databricks_host_creds(self.databricks_profile_uri)
@@ -65,7 +85,7 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
             body["page_token"] = page_token
         return body
 
-    def list_artifacts(self, path=None):
+    def list_artifacts(self, path: Optional[str] = None) -> list[FileInfo]:
         infos = []
         page_token = None
         if not path:
@@ -78,8 +98,8 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
                 json_response = json.loads(response.text)
             except Exception:
                 raise MlflowException(
-                    "API request to list files under path `%s` failed with status code %s. "
-                    "Response body: %s" % (path, response.status_code, response.text)
+                    f"API request to list files under path `{path}` failed with status code "
+                    f"{response.status_code}. Response body: {response.text}"
                 )
             artifact_list = json_response.get("files", [])
             next_page_token = json_response.get("next_page_token", None)
@@ -110,23 +130,79 @@ class DatabricksModelsArtifactRepository(ArtifactRepository):
             json_response = json.loads(response.text)
         except ValueError:
             raise MlflowException(
-                "API request to get presigned uri to for file under path `%s` failed with"
-                " status code %s. Response body: %s" % (path, response.status_code, response.text)
+                f"API request to get presigned uri to for file under path `{path}` failed with"
+                f" status code {response.status_code}. Response body: {response.text}"
             )
         return json_response.get("signed_uri", None), json_response.get("headers", None)
 
     def _extract_headers_from_signed_url(self, headers):
+        if headers is None:
+            return {}
         filtered_headers = filter(lambda h: "name" in h and "value" in h, headers)
         return {header.get("name"): header.get("value") for header in filtered_headers}
 
+    def _parallelized_download_from_cloud(
+        self, signed_uri, headers, file_size, dst_local_file_path, dst_run_relative_artifact_path
+    ):
+        from mlflow.utils.databricks_utils import get_databricks_env_vars
+
+        with remove_on_error(dst_local_file_path):
+            parallel_download_subproc_env = os.environ.copy()
+            parallel_download_subproc_env.update(
+                get_databricks_env_vars(self.databricks_profile_uri)
+            )
+            failed_downloads = parallelized_download_file_using_http_uri(
+                thread_pool_executor=self.chunk_thread_pool,
+                http_uri=signed_uri,
+                download_path=dst_local_file_path,
+                remote_file_path=dst_run_relative_artifact_path,
+                file_size=file_size,
+                # URI type is not known in this context
+                uri_type=None,
+                chunk_size=MLFLOW_MULTIPART_DOWNLOAD_CHUNK_SIZE.get(),
+                env=parallel_download_subproc_env,
+                headers=headers,
+            )
+            if failed_downloads:
+                new_signed_uri, new_headers = self._get_signed_download_uri(
+                    dst_run_relative_artifact_path
+                )
+                new_headers = self._extract_headers_from_signed_url(new_headers)
+                download_chunk_retries(
+                    chunks=list(failed_downloads),
+                    http_uri=new_signed_uri,
+                    headers=new_headers,
+                    download_path=dst_local_file_path,
+                )
+
     def _download_file(self, remote_file_path, local_path):
         try:
+            parent_dir, _ = posixpath.split(remote_file_path)
+            file_infos = self.list_artifacts(parent_dir)
+            file_info = [info for info in file_infos if info.path == remote_file_path]
+            file_size = file_info[0].file_size if len(file_info) == 1 else None
             signed_uri, raw_headers = self._get_signed_download_uri(remote_file_path)
             headers = {}
             if raw_headers is not None:
                 # Don't send None to _extract_headers_from_signed_url
                 headers = self._extract_headers_from_signed_url(raw_headers)
-            download_file_using_http_uri(signed_uri, local_path, _DOWNLOAD_CHUNK_SIZE, headers)
+            if (
+                not file_size
+                or file_size <= MLFLOW_MULTIPART_DOWNLOAD_CHUNK_SIZE.get()
+                or not MLFLOW_ENABLE_MULTIPART_DOWNLOAD.get()
+            ):
+                download_file_using_http_uri(
+                    signed_uri, local_path, MLFLOW_MULTIPART_DOWNLOAD_CHUNK_SIZE.get(), headers
+                )
+            else:
+                self._parallelized_download_from_cloud(
+                    signed_uri,
+                    headers,
+                    file_size,
+                    local_path,
+                    remote_file_path,
+                )
+
         except Exception as err:
             raise MlflowException(err)
 

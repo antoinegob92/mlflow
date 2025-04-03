@@ -1,51 +1,44 @@
-<!-- 🚨 We recommend pull requests be filed from a non-master branch on a repository fork (e.g. <username>:fix-xxx). 🚨 -->
+### Related Issues/PRs
 
-## Related Issues/PRs
-
-<!--
-Please reference any related feature requests, issues, or PRs here. For example, `#123`. To automatically close the referenced issues when this PR is merged, please use a closing keyword (close, fix, or resolve). For example, `Resolve #123`. See https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue for more information.
--->
-
+<!-- Uncomment 'Resolve' if this PR can close the linked items. -->
 <!-- Resolve --> #xxx
 
-## What changes are proposed in this pull request?
+### What changes are proposed in this pull request?
 
-(Please fill in changes proposed in this fix)
+<!-- Please fill in changes proposed in this PR. -->
 
-## How is this patch tested?
-
-<!--
-If you're unsure about what to test, where to add tests, or how to run tests, please feel free to ask.
--->
+### How is this PR tested?
 
 - [ ] Existing unit/integration tests
 - [ ] New unit/integration tests
-- [ ] Manual tests (describe details, including test results, below)
+- [ ] Manual tests
 
-<!--
-Please describe how you confirmed the proposed feature/bug-fix/change works here. For example, if you fixed an MLflow client API, you could attach the code that didn't work prior to the fix but works now, or if you added a new feature on MLflow UI, you could attach a video that demonstrates the feature.
--->
+<!-- Attach code, screenshot, video used for manual testing here. -->
 
-## Does this PR change the documentation?
+### Does this PR require documentation update?
 
 - [ ] No. You can skip the rest of this section.
-- [ ] Yes. Make sure the changed pages / sections render correctly in the documentation preview.
+- [ ] Yes. I've updated:
+  - [ ] Examples
+  - [ ] API references
+  - [ ] Instructions
 
-## Release Notes
+### Release Notes
 
-### Is this a user-facing change?
+#### Is this a user-facing change?
 
 - [ ] No. You can skip the rest of this section.
 - [ ] Yes. Give a description of this change to be included in the release notes for MLflow users.
 
-(Details in 1-2 sentences. You can just refer to another PR with a description if this PR is part of a larger change.)
+<!-- Details in 1-2 sentences. You can just refer to another PR with a description if this PR is part of a larger change. -->
 
-### What component(s), interfaces, languages, and integrations does this PR affect?
+#### What component(s), interfaces, languages, and integrations does this PR affect?
 
 Components
 
 - [ ] `area/artifacts`: Artifact stores and artifact logging
 - [ ] `area/build`: Build and test infrastructure for MLflow
+- [ ] `area/deployments`: MLflow Deployments client APIs, server, and third-party Deployments integrations
 - [ ] `area/docs`: MLflow documentation pages
 - [ ] `area/examples`: Example code
 - [ ] `area/model-registry`: Model Registry service, APIs, and the fluent client calls for Model Registry
@@ -83,10 +76,29 @@ Note that GitHub prefixes anchor names in markdown with "user-content-".
 
 <a name="release-note-category"></a>
 
-### How should the PR be classified in the release notes? Choose one:
+#### How should the PR be classified in the release notes? Choose one:
 
-- [ ] `rn/breaking-change` - The PR will be mentioned in the "Breaking Changes" section
 - [ ] `rn/none` - No description will be included. The PR will be mentioned only by the PR number in the "Small Bugfixes and Documentation Updates" section
+- [ ] `rn/breaking-change` - The PR will be mentioned in the "Breaking Changes" section
 - [ ] `rn/feature` - A new user-facing feature worth mentioning in the release notes
 - [ ] `rn/bug-fix` - A user-facing bug fix worth mentioning in the release notes
 - [ ] `rn/documentation` - A user-facing documentation change worth mentioning in the release notes
+
+#### Should this PR be included in the next patch release?
+
+`Yes` should be selected for bug fixes, documentation updates, and other small changes. `No` should be selected for new features and larger changes. If you're unsure about the release classification of this PR, leave this unchecked to let the maintainers decide.
+
+<details>
+<summary>What is a minor/patch release?</summary>
+
+- Minor release: a release that increments the second part of the version number (e.g., 1.2.0 -> 1.3.0).
+  Bug fixes, doc updates and new features usually go into minor releases.
+- Patch release: a release that increments the third part of the version number (e.g., 1.2.0 -> 1.2.1).
+  Bug fixes and doc updates usually go into patch releases.
+
+</details>
+
+<!-- patch -->
+
+- [ ] Yes (this PR will be cherry-picked and included in the next patch release)
+- [ ] No (this PR will be included in the next minor release)

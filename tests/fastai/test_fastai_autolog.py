@@ -2,23 +2,22 @@ import pickle
 from functools import partial
 from unittest.mock import patch
 
-import pytest
+import matplotlib as mpl
 import numpy as np
 import pandas as pd
-import matplotlib as mpl
-from sklearn import datasets
-from torch import nn, optim
+import pytest
+from fastai.callback.all import EarlyStoppingCallback, SaveModelCallback
 from fastai.learner import Learner
 from fastai.optimizer import OptimWrapper
 from fastai.tabular.all import TabularDataLoaders
-from fastai.callback.all import EarlyStoppingCallback, SaveModelCallback
+from sklearn import datasets
+from torch import nn, optim
 
 import mlflow
 import mlflow.fastai
 from mlflow import MlflowClient
 from mlflow.fastai.callback import __MlflowFastaiCallback
 from mlflow.utils.autologging_utils import BatchMetricsLogger
-from tests.conftest import tracking_uri_mock  # pylint: disable=unused-import
 
 mpl.use("Agg")
 
@@ -85,6 +84,16 @@ def test_fastai_autolog_ends_auto_created_run(iris_data, fit_variant):
     assert mlflow.active_run() is None
 
 
+def test_extra_tags_fastai_autolog(iris_data):
+    mlflow.fastai.autolog(extra_tags={"test_tag": "fastai_autolog"})
+    model = fastai_tabular_model(iris_data)
+    model.fit_one_cycle(1)
+
+    run = mlflow.last_active_run()
+    assert run.data.tags["test_tag"] == "fastai_autolog"
+    assert run.data.tags[mlflow.utils.mlflow_tags.MLFLOW_AUTOLOGGING] == "fastai"
+
+
 @pytest.mark.parametrize("fit_variant", ["fit", "fit_one_cycle"])
 def test_fastai_autolog_persists_manually_created_run(iris_data, fit_variant):
     mlflow.fastai.autolog()
@@ -105,7 +114,6 @@ def test_fastai_autolog_persists_manually_created_run(iris_data, fit_variant):
 
 @pytest.fixture
 def fastai_random_tabular_data_run(iris_data, fit_variant):
-    # pylint: disable=unused-argument
     mlflow.fastai.autolog()
 
     model = fastai_tabular_model(iris_data)
@@ -123,7 +131,6 @@ def fastai_random_tabular_data_run(iris_data, fit_variant):
 
 @pytest.mark.parametrize("fit_variant", ["fit", "fit_one_cycle", "fine_tune"])
 def test_fastai_autolog_logs_expected_data(fastai_random_tabular_data_run, fit_variant):
-    # pylint: disable=unused-argument
     model, run = fastai_random_tabular_data_run
     data = run.data
 
@@ -179,7 +186,6 @@ def test_fastai_autolog_logs_expected_data(fastai_random_tabular_data_run, fit_v
 
 @pytest.mark.parametrize("fit_variant", ["fit", "fit_one_cycle", "fine_tune"])
 def test_fastai_autolog_opt_func_expected_data(iris_data, fit_variant):
-    # pylint: disable=unused-argument
     mlflow.fastai.autolog()
     model = fastai_tabular_model(iris_data, opt_func=partial(OptimWrapper, opt=optim.Adam))
 
@@ -217,7 +223,6 @@ def test_fastai_autolog_log_models_configuration(log_models, iris_data):
 
 @pytest.mark.parametrize("fit_variant", ["fit_one_cycle", "fine_tune"])
 def test_fastai_autolog_logs_default_params(fastai_random_tabular_data_run, fit_variant):
-    # pylint: disable=unused-argument
     client = MlflowClient()
     run_id = client.search_runs(["0"])[0].info.run_id
     artifacts = client.list_artifacts(run_id)
@@ -244,11 +249,10 @@ def test_fastai_autolog_model_can_load_from_artifact(fastai_random_tabular_data_
     model_wrapper.predict(iris_dataframe())
 
 
-def get_fastai_random_data_run_with_callback(iris_data, fit_variant, callback, patience, tmpdir):
-    # pylint: disable=unused-argument
+def get_fastai_random_data_run_with_callback(iris_data, fit_variant, callback, patience, tmp_path):
     mlflow.fastai.autolog()
 
-    model = fastai_tabular_model(iris_data, model_dir=tmpdir)
+    model = fastai_tabular_model(iris_data, model_dir=tmp_path)
 
     if callback == "early":
         cb = EarlyStoppingCallback(patience=patience, min_delta=MIN_DELTA)
@@ -270,9 +274,9 @@ def get_fastai_random_data_run_with_callback(iris_data, fit_variant, callback, p
 
 
 @pytest.fixture
-def fastai_random_data_run_with_callback(iris_data, fit_variant, callback, patience, tmpdir):
+def fastai_random_data_run_with_callback(iris_data, fit_variant, callback, patience, tmp_path):
     return get_fastai_random_data_run_with_callback(
-        iris_data, fit_variant, callback, patience, tmpdir
+        iris_data, fit_variant, callback, patience, tmp_path
     )
 
 
@@ -288,9 +292,7 @@ def test_fastai_autolog_save_and_early_stop_logs(fastai_random_data_run_with_cal
 
     assert len(metric_history) == num_of_epochs
 
-    model_uri = "runs:/{run_id}/{artifact_path}".format(
-        run_id=run.info.run_id, artifact_path="model"
-    )
+    model_uri = f"runs:/{run.info.run_id}/model"
 
     model_wrapper = mlflow.fastai._FastaiModelWrapper(model)
     reloaded_model = mlflow.fastai.load_model(model_uri=model_uri)
@@ -373,7 +375,7 @@ def test_fastai_autolog_non_early_stop_callback_does_not_log(fastai_random_data_
 @pytest.mark.parametrize("callback", ["not-early"])
 @pytest.mark.parametrize("patience", [5])
 def test_fastai_autolog_batch_metrics_logger_logs_expected_metrics(
-    fit_variant, callback, patience, tmpdir, iris_data
+    fit_variant, callback, patience, tmp_path, iris_data
 ):
     patched_metrics_data = []
 
@@ -391,7 +393,7 @@ def test_fastai_autolog_batch_metrics_logger_logs_expected_metrics(
 
         record_metrics_mock.side_effect = record_metrics_side_effect
         _, run = get_fastai_random_data_run_with_callback(
-            iris_data, fit_variant, callback, patience, tmpdir
+            iris_data, fit_variant, callback, patience, tmp_path
         )
 
     patched_metrics_data = dict(patched_metrics_data)

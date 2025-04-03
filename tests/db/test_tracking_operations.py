@@ -1,4 +1,3 @@
-import os
 import sqlite3
 import uuid
 from unittest import mock
@@ -8,8 +7,7 @@ import sqlalchemy.dialects.sqlite.pysqlite
 
 import mlflow
 from mlflow import MlflowClient
-from mlflow.tracking._tracking_service.utils import _TRACKING_URI_ENV_VAR
-
+from mlflow.environment_variables import MLFLOW_TRACKING_URI
 
 pytestmark = pytest.mark.notrackingurimock
 
@@ -18,7 +16,7 @@ class Model(mlflow.pyfunc.PythonModel):
     def load_context(self, context):
         pass
 
-    def predict(self, context, model_input):
+    def predict(self, context, model_input, params=None):
         pass
 
 
@@ -27,9 +25,7 @@ def start_run_and_log_data():
         mlflow.log_param("p", "param")
         mlflow.log_metric("m", 1.0)
         mlflow.set_tag("t", "tag")
-        mlflow.pyfunc.log_model(
-            artifact_path="model", python_model=Model(), registered_model_name="model"
-        )
+        mlflow.pyfunc.log_model("model", python_model=Model(), registered_model_name="model")
 
 
 def test_search_runs():
@@ -54,7 +50,7 @@ def test_set_run_status_to_killed():
 def test_database_operational_error(exception, monkeypatch):
     # This test is specifically designed to force errors with SQLite. Skip it if
     # using a non-SQLite backend.
-    if not os.environ[_TRACKING_URI_ENV_VAR].startswith("sqlite"):
+    if not MLFLOW_TRACKING_URI.get().startswith("sqlite"):
         pytest.skip("Only works on SQLite")
 
     # This test patches parts of SQLAlchemy and sqlite3.dbapi to simulate a
@@ -122,8 +118,7 @@ def test_database_operational_error(exception, monkeypatch):
 
     def connect(*args, **kwargs):
         """Wraps sqlite3.dbapi.connect(), returning a wrapped connection."""
-        global connect_counter
-        conn = old_connect(*args, **kwargs)  # pylint: disable=not-callable
+        conn = old_connect(*args, **kwargs)
         return ConnectionWrapper(conn)
 
     def dbapi(*args, **kwargs):
@@ -144,9 +139,7 @@ def test_database_operational_error(exception, monkeypatch):
     # where an earlier test has already created and cached a SQLAlchemy engine
     # (i.e. database connections), preventing our error-throwing monkeypatches
     # from being called.
-    monkeypatch.setitem(
-        os.environ, _TRACKING_URI_ENV_VAR, f"{os.environ[_TRACKING_URI_ENV_VAR]}-{uuid.uuid4().hex}"
-    )
+    monkeypatch.setenv(MLFLOW_TRACKING_URI.name, f"{MLFLOW_TRACKING_URI.get()}-{uuid.uuid4().hex}")
     with pytest.raises(mlflow.MlflowException, match=r"sqlite3\.OperationalError"):
         with mlflow.start_run():
             # This statement will fail with an OperationalError.

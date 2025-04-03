@@ -1,12 +1,13 @@
 import os
-from unittest import mock
 import posixpath
+from unittest import mock
+
 import pytest
 
-from mlflow.store.artifact.mlflow_artifacts_repo import MlflowArtifactsRepository
-from mlflow.store.artifact.artifact_repository_registry import get_artifact_repository
 from mlflow.exceptions import MlflowException
-from mlflow.tracking._tracking_service.utils import _get_default_host_creds
+from mlflow.store.artifact.artifact_repository_registry import get_artifact_repository
+from mlflow.store.artifact.mlflow_artifacts_repo import MlflowArtifactsRepository
+from mlflow.utils.credentials import get_default_host_creds
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -53,6 +54,17 @@ def test_mlflow_artifact_uri_formats_resolved(artifact_uri, resolved_uri, tracki
 
 
 def test_mlflow_artifact_uri_raises_with_invalid_tracking_uri():
+    with pytest.raises(
+        MlflowException,
+        match="When an mlflow-artifacts URI was supplied, the tracking URI must be a valid",
+    ):
+        MlflowArtifactsRepository.resolve_uri(
+            artifact_uri=f"mlflow-artifacts://myhostname:4242{base_path}/hostport",
+            tracking_uri="file:///tmp",
+        )
+
+
+def test_mlflow_artifact_uri_raises_with_invalid_artifact_uri():
     failing_conditions = [f"mlflow-artifacts://5000/{base_path}", "mlflow-artifacts://5000/"]
 
     for failing_condition in failing_conditions:
@@ -78,7 +90,7 @@ class MockResponse:
 
 
 class MockStreamResponse(MockResponse):
-    def iter_content(self, chunk_size):  # pylint: disable=unused-argument
+    def iter_content(self, chunk_size):
         yield self.data.encode("utf-8")
 
     def __enter__(self):
@@ -110,20 +122,21 @@ def mlflow_artifact_repo_with_host():
 
 
 @pytest.mark.parametrize("artifact_path", [None, "dir", "path/to/artifacts/storage"])
-def test_log_artifact(mlflow_artifact_repo, tmpdir, artifact_path):
-    tmp_path = tmpdir.join("a.txt")
-    tmp_path.write("0")
+def test_log_artifact(mlflow_artifact_repo, tmp_path, artifact_path):
+    tmp_path = tmp_path.joinpath("a.txt")
+    tmp_path.write_text("0")
     with mock.patch(
         "mlflow.store.artifact.http_artifact_repo.http_request",
         return_value=MockResponse({}, 200),
     ) as mock_put:
         mlflow_artifact_repo.log_artifact(tmp_path, artifact_path)
-        paths = (artifact_path, tmp_path.basename) if artifact_path else (tmp_path.basename,)
+        paths = (artifact_path, tmp_path.name) if artifact_path else (tmp_path.name,)
         mock_put.assert_called_once_with(
             mlflow_artifact_repo._host_creds,
             posixpath.join("/", *paths),
             "PUT",
-            data=FileObjectMatcher(tmp_path, "rb"),
+            extra_headers={"Content-Type": "text/plain"},
+            data=FileObjectMatcher(str(tmp_path), "rb"),
         )
 
     with mock.patch(
@@ -135,20 +148,21 @@ def test_log_artifact(mlflow_artifact_repo, tmpdir, artifact_path):
 
 
 @pytest.mark.parametrize("artifact_path", [None, "dir", "path/to/artifacts/storage"])
-def test_log_artifact_with_host_and_port(mlflow_artifact_repo_with_host, tmpdir, artifact_path):
-    tmp_path = tmpdir.join("a.txt")
-    tmp_path.write("0")
+def test_log_artifact_with_host_and_port(mlflow_artifact_repo_with_host, tmp_path, artifact_path):
+    tmp_path = tmp_path.joinpath("a.txt")
+    tmp_path.write_text("0")
     with mock.patch(
         "mlflow.store.artifact.http_artifact_repo.http_request",
         return_value=MockResponse({}, 200),
     ) as mock_put:
         mlflow_artifact_repo_with_host.log_artifact(tmp_path, artifact_path)
-        paths = (artifact_path, tmp_path.basename) if artifact_path else (tmp_path.basename,)
+        paths = (artifact_path, tmp_path.name) if artifact_path else (tmp_path.name,)
         mock_put.assert_called_once_with(
             mlflow_artifact_repo_with_host._host_creds,
             posixpath.join("/", *paths),
             "PUT",
-            data=FileObjectMatcher(tmp_path, "rb"),
+            extra_headers={"Content-Type": "text/plain"},
+            data=FileObjectMatcher(str(tmp_path), "rb"),
         )
 
     with mock.patch(
@@ -160,19 +174,21 @@ def test_log_artifact_with_host_and_port(mlflow_artifact_repo_with_host, tmpdir,
 
 
 @pytest.mark.parametrize("artifact_path", [None, "dir", "path/to/artifacts/storage"])
-def test_log_artifacts(mlflow_artifact_repo, tmpdir, artifact_path):
-    tmp_path_a = tmpdir.join("a.txt")
-    tmp_path_b = tmpdir.mkdir("dir").join("b.txt")
-    tmp_path_a.write("0")
-    tmp_path_b.write("1")
+def test_log_artifacts(mlflow_artifact_repo, tmp_path, artifact_path):
+    tmp_path_a = tmp_path.joinpath("a.txt")
+    directory = tmp_path.joinpath("dir")
+    directory.mkdir()
+    tmp_path_b = directory.joinpath("b.txt")
+    tmp_path_a.write_text("0")
+    tmp_path_b.write_text("1")
 
     with mock.patch.object(mlflow_artifact_repo, "log_artifact") as mock_log_artifact:
-        mlflow_artifact_repo.log_artifacts(tmpdir, artifact_path)
+        mlflow_artifact_repo.log_artifacts(tmp_path, artifact_path)
         mock_log_artifact.assert_has_calls(
             [
-                mock.call(tmp_path_a.strpath, artifact_path),
+                mock.call(str(tmp_path_a), artifact_path),
                 mock.call(
-                    tmp_path_b.strpath,
+                    str(tmp_path_b),
                     posixpath.join(artifact_path, "dir") if artifact_path else "dir",
                 ),
             ],
@@ -183,7 +199,7 @@ def test_log_artifacts(mlflow_artifact_repo, tmpdir, artifact_path):
         return_value=MockResponse({}, 400),
     ):
         with pytest.raises(Exception, match="request failed"):
-            mlflow_artifact_repo.log_artifacts(tmpdir, artifact_path)
+            mlflow_artifact_repo.log_artifacts(tmp_path, artifact_path)
 
 
 def test_list_artifacts(mlflow_artifact_repo):
@@ -195,7 +211,7 @@ def test_list_artifacts(mlflow_artifact_repo):
         endpoint = "/mlflow-artifacts/artifacts"
         url, _ = mlflow_artifact_repo.artifact_uri.split(endpoint, maxsplit=1)
         mock_get.assert_called_once_with(
-            _get_default_host_creds(url),
+            get_default_host_creds(url),
             endpoint,
             "GET",
             params={"path": ""},
@@ -246,12 +262,12 @@ def read_file(path):
 
 
 @pytest.mark.parametrize("remote_file_path", ["a.txt", "dir/b.xtx"])
-def test_download_file(mlflow_artifact_repo, tmpdir, remote_file_path):
+def test_download_file(mlflow_artifact_repo, tmp_path, remote_file_path):
     with mock.patch(
         "mlflow.store.artifact.http_artifact_repo.http_request",
         return_value=MockStreamResponse("data", 200),
     ) as mock_get:
-        tmp_path = tmpdir.join(posixpath.basename(remote_file_path))
+        tmp_path = tmp_path.joinpath(posixpath.basename(remote_file_path))
         mlflow_artifact_repo._download_file(remote_file_path, tmp_path)
         mock_get.assert_called_once_with(
             mlflow_artifact_repo._host_creds,
@@ -270,7 +286,7 @@ def test_download_file(mlflow_artifact_repo, tmpdir, remote_file_path):
             mlflow_artifact_repo._download_file(remote_file_path, tmp_path)
 
 
-def test_download_artifacts(mlflow_artifact_repo, tmpdir):
+def test_download_artifacts(mlflow_artifact_repo, tmp_path):
     # This test simulates downloading artifacts in the following structure:
     # ---------
     # - a.txt
@@ -312,9 +328,9 @@ def test_download_artifacts(mlflow_artifact_repo, tmpdir):
             raise Exception("Unreachable")
 
     with mock.patch("mlflow.store.artifact.http_artifact_repo.http_request", http_request):
-        mlflow_artifact_repo.download_artifacts("", tmpdir)
-        paths = [os.path.join(root, f) for root, _, files in os.walk(tmpdir) for f in files]
-        assert [os.path.relpath(p, tmpdir) for p in paths] == [
+        mlflow_artifact_repo.download_artifacts("", tmp_path)
+        paths = [os.path.join(root, f) for root, _, files in os.walk(tmp_path) for f in files]
+        assert [os.path.relpath(p, tmp_path) for p in paths] == [
             "a.txt",
             os.path.join("dir", "b.txt"),
         ]

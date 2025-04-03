@@ -1,39 +1,41 @@
-from pathlib import Path
-import sys
 import os
-import pytest
+import sys
+from pathlib import Path
 from unittest import mock
 
-import onnx
-import torch
-from torch import nn
-import torch.onnx
-from torch.utils.data import DataLoader
-from sklearn import datasets
-import pandas as pd
 import numpy as np
+import onnx
+import onnxruntime as ort
+import pandas as pd
+import pytest
+import torch
+import torch.onnx
 import yaml
+from packaging.version import Version
+from sklearn import datasets
+from torch import nn
+from torch.utils.data import DataLoader
 
 import mlflow.onnx
 import mlflow.pyfunc.scoring_server as pyfunc_scoring_server
 from mlflow import pyfunc
 from mlflow.deployments import PredictionsResponse
 from mlflow.exceptions import MlflowException
-from mlflow.models import infer_signature, Model
+from mlflow.models import Model, infer_signature
 from mlflow.models.utils import _read_example
-from mlflow.utils.file_utils import TempDir
-from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
 from mlflow.utils.environment import _mlflow_conda_env
+from mlflow.utils.file_utils import TempDir
 from mlflow.utils.model_utils import _get_flavor_configuration
 
 from tests.helper_functions import (
-    pyfunc_serve_and_score_model,
-    _compare_conda_env_requirements,
     _assert_pip_requirements,
-    _is_available_on_pypi,
+    _compare_conda_env_requirements,
     _compare_logged_code_paths,
+    _is_available_on_pypi,
     _mlflow_major_version_string,
+    assert_register_model_called_with_local_model_path,
+    pyfunc_serve_and_score_model,
 )
 
 TEST_DIR = "tests"
@@ -60,8 +62,7 @@ def data():
 @pytest.fixture(scope="module")
 def dataset(data):
     x, y = data
-    dataset = [(xi.astype(np.float32), yi.astype(np.float32)) for xi, yi in zip(x.values, y.values)]
-    return dataset
+    return [(xi.astype(np.float32), yi.astype(np.float32)) for xi, yi in zip(x.values, y.values)]
 
 
 @pytest.fixture(scope="module")
@@ -97,8 +98,8 @@ def model(dataset):
 
 
 @pytest.fixture
-def onnx_model(model, sample_input, tmpdir):
-    model_path = os.path.join(str(tmpdir), "torch_onnx")
+def onnx_model(model, sample_input, tmp_path):
+    model_path = os.path.join(tmp_path, "torch_onnx")
     dynamic_axes = {"input": {0: "batch"}}
     torch.onnx.export(
         model, sample_input, model_path, dynamic_axes=dynamic_axes, input_names=["input"]
@@ -152,8 +153,8 @@ def multi_tensor_model_prediction(multi_tensor_model, data):
 
 
 @pytest.fixture
-def multi_tensor_onnx_model(multi_tensor_model, sample_input, tmpdir):
-    model_path = os.path.join(str(tmpdir), "multi_tensor_onnx")
+def multi_tensor_onnx_model(multi_tensor_model, sample_input, tmp_path):
+    model_path = os.path.join(tmp_path, "multi_tensor_onnx")
     _sample_input = torch.split(sample_input, 2, 1)
     torch.onnx.export(
         multi_tensor_model,
@@ -224,24 +225,71 @@ def predicted_multiple_inputs(data_multiple_inputs):
 
 
 @pytest.fixture
-def model_path(tmpdir):
-    return os.path.join(tmpdir.strpath, "model")
+def model_path(tmp_path):
+    return os.path.join(tmp_path, "model")
 
 
 @pytest.fixture
-def onnx_custom_env(tmpdir):
-    conda_env = os.path.join(str(tmpdir), "conda_env.yml")
+def onnx_custom_env(tmp_path):
+    conda_env = os.path.join(tmp_path, "conda_env.yml")
     _mlflow_conda_env(conda_env, additional_pip_deps=["onnx", "pytest", "torch"])
     return conda_env
 
 
 def test_model_save_load(onnx_model, model_path):
+    # New ONNX versions can optionally convert to external data
+    if Version(onnx.__version__) >= Version("1.9.0"):
+        onnx.convert_model_to_external_data = mock.Mock()
+
     mlflow.onnx.save_model(onnx_model, model_path)
+
+    if Version(onnx.__version__) >= Version("1.9.0"):
+        assert onnx.convert_model_to_external_data.called
 
     # Loading ONNX model
     onnx.checker.check_model = mock.Mock()
     mlflow.onnx.load_model(model_path)
     assert onnx.checker.check_model.called
+
+
+@pytest.mark.skipif(
+    Version(onnx.__version__) < Version("1.9.0"),
+    reason="The save_as_external_data param is only available in onnx version >= 1.9.0",
+)
+@pytest.mark.parametrize("save_as_external_data", [True, False])
+def test_model_log_load(onnx_model, save_as_external_data):
+    onnx.convert_model_to_external_data = mock.Mock()
+
+    with mlflow.start_run():
+        model_info = mlflow.onnx.log_model(
+            onnx_model, "model", save_as_external_data=save_as_external_data
+        )
+
+    if save_as_external_data:
+        onnx.convert_model_to_external_data.assert_called_once()
+    else:
+        onnx.convert_model_to_external_data.assert_not_called()
+
+    # Loading ONNX model
+    onnx.checker.check_model = mock.Mock()
+    mlflow.onnx.load_model(model_info.model_uri)
+    onnx.checker.check_model.assert_called_once()
+
+
+@pytest.mark.skipif(
+    Version(onnx.__version__) < Version("1.9.0"),
+    reason="The save_as_external_data param is only available in onnx version >= 1.9.0",
+)
+def test_model_save_load_nonexternal_data(onnx_model, model_path):
+    onnx.convert_model_to_external_data = mock.Mock()
+
+    mlflow.onnx.save_model(onnx_model, model_path, save_as_external_data=False)
+    onnx.convert_model_to_external_data.assert_not_called()
+
+    # Loading ONNX model
+    onnx.checker.check_model = mock.Mock()
+    mlflow.onnx.load_model(model_path)
+    onnx.checker.check_model.assert_called_once()
 
 
 def test_signature_and_examples_are_saved_correctly(onnx_model, data, onnx_custom_env):
@@ -294,6 +342,23 @@ def test_model_save_load_evaluate_pyfunc_format(onnx_model, model_path, data, pr
     )
 
 
+def test_model_save_load_pyfunc_format_with_session_options(onnx_model, model_path):
+    onnx_session_options = {
+        "execution_mode": "sequential",
+        "graph_optimization_level": 99,
+        "intra_op_num_threads": 19,
+    }
+    mlflow.onnx.save_model(onnx_model, model_path, onnx_session_options=onnx_session_options)
+
+    # Loading pyfunc model
+    pyfunc_loaded = mlflow.pyfunc.load_model(model_path)
+    session_options = pyfunc_loaded._model_impl.rt.get_session_options()
+
+    assert session_options.execution_mode == ort.ExecutionMode.ORT_SEQUENTIAL
+    assert session_options.graph_optimization_level == ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    assert session_options.intra_op_num_threads == 19
+
+
 def test_model_save_load_multiple_inputs(onnx_model_multiple_inputs_float64, model_path):
     mlflow.onnx.save_model(onnx_model_multiple_inputs_float64, model_path)
 
@@ -303,10 +368,17 @@ def test_model_save_load_multiple_inputs(onnx_model_multiple_inputs_float64, mod
     assert onnx.checker.check_model.called
 
 
+@pytest.mark.parametrize("save_as_external_data", [True, False])
 def test_model_save_load_evaluate_pyfunc_format_multiple_inputs(
-    onnx_model_multiple_inputs_float64, data_multiple_inputs, predicted_multiple_inputs, model_path
+    onnx_model_multiple_inputs_float64,
+    data_multiple_inputs,
+    predicted_multiple_inputs,
+    model_path,
+    save_as_external_data,
 ):
-    mlflow.onnx.save_model(onnx_model_multiple_inputs_float64, model_path)
+    mlflow.onnx.save_model(
+        onnx_model_multiple_inputs_float64, model_path, save_as_external_data=save_as_external_data
+    )
 
     # Loading pyfunc model
     pyfunc_loaded = mlflow.pyfunc.load_model(model_path)
@@ -339,7 +411,7 @@ def test_model_save_load_evaluate_pyfunc_format_multiple_inputs(
 # is fixed.
 
 
-def test_pyfunc_representation_of_float32_model_casts_and_evalutes_float64_inputs(
+def test_pyfunc_representation_of_float32_model_casts_and_evaluates_float64_inputs(
     onnx_model_multiple_inputs_float32, model_path, data_multiple_inputs, predicted_multiple_inputs
 ):
     """
@@ -373,15 +445,11 @@ def test_model_log(onnx_model):
             if should_start_run:
                 mlflow.start_run()
             artifact_path = "onnx_model"
-            model_info = mlflow.onnx.log_model(onnx_model=onnx_model, artifact_path=artifact_path)
-            model_uri = "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-            assert model_info.model_uri == model_uri
+            model_info = mlflow.onnx.log_model(onnx_model, artifact_path)
 
             # Load model
             onnx.checker.check_model = mock.Mock()
-            mlflow.onnx.load_model(model_uri)
+            mlflow.onnx.load_model(model_info.model_uri)
             assert onnx.checker.check_model.called
         finally:
             mlflow.end_run()
@@ -389,44 +457,38 @@ def test_model_log(onnx_model):
 
 def test_log_model_calls_register_model(onnx_model, onnx_custom_env):
     artifact_path = "model"
-    register_model_patch = mock.patch("mlflow.register_model")
+    register_model_patch = mock.patch("mlflow.tracking._model_registry.fluent._register_model")
     with mlflow.start_run(), register_model_patch:
-        mlflow.onnx.log_model(
-            onnx_model=onnx_model,
-            artifact_path=artifact_path,
+        model_info = mlflow.onnx.log_model(
+            onnx_model,
+            artifact_path,
             conda_env=onnx_custom_env,
             registered_model_name="AdsModel1",
         )
-        model_uri = "runs:/{run_id}/{artifact_path}".format(
-            run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-        )
-        mlflow.register_model.assert_called_once_with(
-            model_uri, "AdsModel1", await_registration_for=DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+        assert_register_model_called_with_local_model_path(
+            register_model_mock=mlflow.tracking._model_registry.fluent._register_model,
+            model_uri=model_info.model_uri,
+            registered_model_name="AdsModel1",
         )
 
 
 def test_log_model_no_registered_model_name(onnx_model, onnx_custom_env):
     artifact_path = "model"
-    register_model_patch = mock.patch("mlflow.register_model")
+    register_model_patch = mock.patch("mlflow.tracking._model_registry.fluent._register_model")
     with mlflow.start_run(), register_model_patch:
-        mlflow.onnx.log_model(
-            onnx_model=onnx_model, artifact_path=artifact_path, conda_env=onnx_custom_env
-        )
-        mlflow.register_model.assert_not_called()
+        mlflow.onnx.log_model(onnx_model, artifact_path, conda_env=onnx_custom_env)
+        mlflow.tracking._model_registry.fluent._register_model.assert_not_called()
 
 
 def test_model_log_evaluate_pyfunc_format(onnx_model, data, predicted):
     x = data[0]
 
-    with mlflow.start_run() as run:
+    with mlflow.start_run():
         artifact_path = "onnx_model"
-        mlflow.onnx.log_model(onnx_model=onnx_model, artifact_path=artifact_path)
-        model_uri = "runs:/{run_id}/{artifact_path}".format(
-            run_id=run.info.run_id, artifact_path=artifact_path
-        )
+        model_info = mlflow.onnx.log_model(onnx_model, artifact_path)
 
         # Loading pyfunc model
-        pyfunc_loaded = mlflow.pyfunc.load_model(model_uri=model_uri)
+        pyfunc_loaded = mlflow.pyfunc.load_model(model_uri=model_info.model_uri)
         np.testing.assert_allclose(
             pyfunc_loaded.predict(x).values.flatten(), predicted, rtol=1e-05, atol=1e-05
         )
@@ -492,64 +554,68 @@ def test_model_save_persists_requirements_in_mlflow_model_directory(
     _compare_conda_env_requirements(onnx_custom_env, saved_pip_req_path)
 
 
-def test_log_model_with_pip_requirements(onnx_model, tmpdir):
+def test_log_model_with_pip_requirements(onnx_model, tmp_path):
     expected_mlflow_version = _mlflow_major_version_string()
     # Path to a requirements file
-    req_file = tmpdir.join("requirements.txt")
-    req_file.write("a")
+    req_file = tmp_path.joinpath("requirements.txt")
+    req_file.write_text("a")
     with mlflow.start_run():
-        mlflow.onnx.log_model(onnx_model, "model", pip_requirements=req_file.strpath)
-        _assert_pip_requirements(
-            mlflow.get_artifact_uri("model"), [expected_mlflow_version, "a"], strict=True
-        )
+        model_info = mlflow.onnx.log_model(onnx_model, "model", pip_requirements=str(req_file))
+        _assert_pip_requirements(model_info.model_uri, [expected_mlflow_version, "a"], strict=True)
 
     # List of requirements
     with mlflow.start_run():
-        mlflow.onnx.log_model(onnx_model, "model", pip_requirements=[f"-r {req_file.strpath}", "b"])
+        model_info = mlflow.onnx.log_model(
+            onnx_model, "model", pip_requirements=[f"-r {req_file}", "b"]
+        )
         _assert_pip_requirements(
-            mlflow.get_artifact_uri("model"), [expected_mlflow_version, "a", "b"], strict=True
+            model_info.model_uri, [expected_mlflow_version, "a", "b"], strict=True
         )
 
     # Constraints file
     with mlflow.start_run():
-        mlflow.onnx.log_model(onnx_model, "model", pip_requirements=[f"-c {req_file.strpath}", "b"])
+        model_info = mlflow.onnx.log_model(
+            onnx_model, "model", pip_requirements=[f"-c {req_file}", "b"]
+        )
         _assert_pip_requirements(
-            mlflow.get_artifact_uri("model"),
+            model_info.model_uri,
             [expected_mlflow_version, "b", "-c constraints.txt"],
             ["a"],
             strict=True,
         )
 
 
-def test_log_model_with_extra_pip_requirements(onnx_model, tmpdir):
+def test_log_model_with_extra_pip_requirements(onnx_model, tmp_path):
     expected_mlflow_version = _mlflow_major_version_string()
     default_reqs = mlflow.onnx.get_default_pip_requirements()
 
     # Path to a requirements file
-    req_file = tmpdir.join("requirements.txt")
-    req_file.write("a")
+    req_file = tmp_path.joinpath("requirements.txt")
+    req_file.write_text("a")
     with mlflow.start_run():
-        mlflow.onnx.log_model(onnx_model, "model", extra_pip_requirements=req_file.strpath)
+        model_info = mlflow.onnx.log_model(
+            onnx_model, "model", extra_pip_requirements=str(req_file)
+        )
         _assert_pip_requirements(
-            mlflow.get_artifact_uri("model"), [expected_mlflow_version, *default_reqs, "a"]
+            model_info.model_uri, [expected_mlflow_version, *default_reqs, "a"]
         )
 
     # List of requirements
     with mlflow.start_run():
-        mlflow.onnx.log_model(
-            onnx_model, "model", extra_pip_requirements=[f"-r {req_file.strpath}", "b"]
+        model_info = mlflow.onnx.log_model(
+            onnx_model, "model", extra_pip_requirements=[f"-r {req_file}", "b"]
         )
         _assert_pip_requirements(
-            mlflow.get_artifact_uri("model"), [expected_mlflow_version, *default_reqs, "a", "b"]
+            model_info.model_uri, [expected_mlflow_version, *default_reqs, "a", "b"]
         )
 
     # Constraints file
     with mlflow.start_run():
-        mlflow.onnx.log_model(
-            onnx_model, "model", extra_pip_requirements=[f"-c {req_file.strpath}", "b"]
+        model_info = mlflow.onnx.log_model(
+            onnx_model, "model", extra_pip_requirements=[f"-c {req_file}", "b"]
         )
         _assert_pip_requirements(
-            mlflow.get_artifact_uri("model"),
+            model_info.model_uri,
             [expected_mlflow_version, *default_reqs, "b", "-c constraints.txt"],
             ["a"],
         )
@@ -574,14 +640,8 @@ def test_model_log_persists_specified_conda_env_in_mlflow_model_directory(
 ):
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.onnx.log_model(
-            onnx_model=onnx_model, artifact_path=artifact_path, conda_env=onnx_custom_env
-        )
-        model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-        )
+        model_info = mlflow.onnx.log_model(onnx_model, artifact_path, conda_env=onnx_custom_env)
+        model_path = _download_artifact_from_uri(model_info.model_uri)
 
     pyfunc_conf = _get_flavor_configuration(model_path=model_path, flavor_name=pyfunc.FLAVOR_NAME)
     saved_conda_env_path = os.path.join(model_path, pyfunc_conf[pyfunc.ENV]["conda"])
@@ -598,14 +658,8 @@ def test_model_log_persists_specified_conda_env_in_mlflow_model_directory(
 def test_model_log_persists_requirements_in_mlflow_model_directory(onnx_model, onnx_custom_env):
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.onnx.log_model(
-            onnx_model=onnx_model, artifact_path=artifact_path, conda_env=onnx_custom_env
-        )
-        model_path = _download_artifact_from_uri(
-            "runs:/{run_id}/{artifact_path}".format(
-                run_id=mlflow.active_run().info.run_id, artifact_path=artifact_path
-            )
-        )
+        model_info = mlflow.onnx.log_model(onnx_model, artifact_path, conda_env=onnx_custom_env)
+        model_path = _download_artifact_from_uri(model_info.model_uri)
 
     saved_pip_req_path = os.path.join(model_path, "requirements.txt")
     _compare_conda_env_requirements(onnx_custom_env, saved_pip_req_path)
@@ -623,9 +677,8 @@ def test_model_log_without_specified_conda_env_uses_default_env_with_expected_de
 ):
     artifact_path = "model"
     with mlflow.start_run():
-        mlflow.onnx.log_model(onnx_model=onnx_model, artifact_path=artifact_path)
-        model_uri = mlflow.get_artifact_uri(artifact_path)
-    _assert_pip_requirements(model_uri, mlflow.onnx.get_default_pip_requirements())
+        model_info = mlflow.onnx.log_model(onnx_model, artifact_path)
+    _assert_pip_requirements(model_info.model_uri, mlflow.onnx.get_default_pip_requirements())
 
 
 def test_pyfunc_predict_supports_models_with_list_outputs(onnx_sklearn_model, model_path, data):
@@ -643,13 +696,13 @@ def test_pyfunc_predict_supports_models_with_list_outputs(onnx_sklearn_model, mo
 
 def test_log_model_with_code_paths(onnx_model):
     artifact_path = "model"
-    with mlflow.start_run(), mock.patch(
-        "mlflow.onnx._add_code_from_conf_to_system_path"
-    ) as add_mock:
-        mlflow.onnx.log_model(onnx_model, artifact_path, code_paths=[__file__])
-        model_uri = mlflow.get_artifact_uri(artifact_path)
-        _compare_logged_code_paths(__file__, model_uri, mlflow.onnx.FLAVOR_NAME)
-        mlflow.onnx.load_model(model_uri)
+    with (
+        mlflow.start_run(),
+        mock.patch("mlflow.onnx._add_code_from_conf_to_system_path") as add_mock,
+    ):
+        model_info = mlflow.onnx.log_model(onnx_model, artifact_path, code_paths=[__file__])
+        _compare_logged_code_paths(__file__, model_info.model_uri, mlflow.onnx.FLAVOR_NAME)
+        mlflow.onnx.load_model(model_info.model_uri)
         add_mock.assert_called()
 
 
@@ -672,10 +725,9 @@ def test_model_log_with_metadata(onnx_model):
     artifact_path = "model"
 
     with mlflow.start_run():
-        mlflow.onnx.log_model(
-            onnx_model, artifact_path=artifact_path, metadata={"metadata_key": "metadata_value"}
+        model_info = mlflow.onnx.log_model(
+            onnx_model, artifact_path, metadata={"metadata_key": "metadata_value"}
         )
-        model_uri = mlflow.get_artifact_uri(artifact_path)
 
-    reloaded_model = mlflow.pyfunc.load_model(model_uri=model_uri)
+    reloaded_model = mlflow.pyfunc.load_model(model_uri=model_info.model_uri)
     assert reloaded_model.metadata.metadata["metadata_key"] == "metadata_value"

@@ -1,5 +1,6 @@
+import importlib
 import logging
-from typing import Dict, Any, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 import pandas as pd
 
@@ -9,15 +10,13 @@ if TYPE_CHECKING:
 import mlflow
 from mlflow import MlflowException
 from mlflow.models import EvaluationMetric
-from mlflow.models.evaluation.default_evaluator import (
-    _get_regressor_metrics,
-    _get_binary_classifier_metrics,
-)
+from mlflow.models.evaluation.evaluators.classifier import _get_binary_classifier_metrics
+from mlflow.models.evaluation.evaluators.regressor import _get_regressor_metrics
 from mlflow.recipes.utils.metrics import RecipeMetric, _load_custom_metrics
 
 _logger = logging.getLogger(__name__)
 
-_AUTOML_DEFAULT_TIME_BUDGET = 30
+_AUTOML_DEFAULT_TIME_BUDGET = 600
 _MLFLOW_TO_FLAML_METRICS = {
     "mean_absolute_error": "mae",
     "mean_squared_error": "mse",
@@ -43,11 +42,11 @@ def get_estimator_and_best_params(
     y,
     task: str,
     extended_task: str,
-    step_config: Dict[str, Any],
+    step_config: dict[str, Any],
     recipe_root: str,
-    evaluation_metrics: Dict[str, RecipeMetric],
+    evaluation_metrics: dict[str, RecipeMetric],
     primary_metric: str,
-) -> Tuple["BaseEstimator", Dict[str, Any]]:
+) -> tuple["BaseEstimator", dict[str, Any]]:
     return _create_model_automl(
         X, y, task, extended_task, step_config, recipe_root, evaluation_metrics, primary_metric
     )
@@ -55,8 +54,8 @@ def get_estimator_and_best_params(
 
 def _create_custom_metric_flaml(
     task: str, metric_name: str, coeff: int, eval_metric: EvaluationMetric
-) -> callable:
-    def calc_metric(X, y, estimator) -> Dict[str, float]:
+) -> Callable:
+    def calc_metric(X, y, estimator) -> dict[str, float]:
         y_pred = estimator.predict(X)
         builtin_metrics = (
             _get_regressor_metrics(y, y_pred, sample_weights=None)
@@ -68,8 +67,6 @@ def _create_custom_metric_flaml(
         res_df["target"] = y if task == "classification" else y.values
         return eval_metric.eval_fn(res_df, builtin_metrics)
 
-    # pylint: disable=keyword-arg-before-vararg
-    # pylint: disable=unused-argument
     def custom_metric(
         X_val,
         y_val,
@@ -92,9 +89,7 @@ def _create_custom_metric_flaml(
     return custom_metric
 
 
-def _create_sklearn_metric_flaml(metric_name: str, coeff: int, avg: str = "binary") -> callable:
-    # pylint: disable=keyword-arg-before-vararg
-    # pylint: disable=unused-argument
+def _create_sklearn_metric_flaml(metric_name: str, coeff: int, avg: str = "binary") -> Callable:
     def sklearn_metric(
         X_val,
         y_val,
@@ -106,8 +101,6 @@ def _create_sklearn_metric_flaml(metric_name: str, coeff: int, avg: str = "binar
         weight_train=None,
         *args,
     ):
-        import importlib
-
         custom_metrics_mod = importlib.import_module("sklearn.metrics")
         eval_fn = getattr(custom_metrics_mod, metric_name)
         val_metric = coeff * eval_fn(y_val, estimator.predict(X_val), average=avg)
@@ -125,11 +118,11 @@ def _create_model_automl(
     y,
     task: str,
     extended_task: str,
-    step_config: Dict[str, Any],
+    step_config: dict[str, Any],
     recipe_root: str,
-    evaluation_metrics: Dict[str, RecipeMetric],
+    evaluation_metrics: dict[str, RecipeMetric],
     primary_metric: str,
-) -> Tuple["BaseEstimator", Dict[str, Any]]:
+) -> tuple["BaseEstimator", dict[str, Any]]:
     try:
         from flaml import AutoML
     except ImportError:
@@ -180,5 +173,5 @@ def _create_model_automl(
     except Exception as e:
         _logger.warning(e, exc_info=e, stack_info=True)
         raise MlflowException(
-            f"Error has occurred during training of AutoML model using FLAML: {repr(e)}"
+            f"Error has occurred during training of AutoML model using FLAML: {e!r}"
         )

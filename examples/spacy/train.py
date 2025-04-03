@@ -1,8 +1,9 @@
 import random
-from packaging.version import Version
 
 import spacy
-from spacy.util import minibatch, compounding
+from packaging.version import Version
+from spacy.training import Example
+from spacy.util import compounding, minibatch
 
 import mlflow.spacy
 
@@ -33,17 +34,17 @@ if __name__ == "__main__":
     params = {"n_iter": 100, "drop": 0.5}
     mlflow.log_params(params)
 
-    nlp.begin_training()
+    examples = []
+    for text, annotations in TRAIN_DATA:
+        examples.append(Example.from_dict(nlp.make_doc(text), annotations))
+    nlp.initialize(lambda: examples)
     for itn in range(params["n_iter"]):
         random.shuffle(TRAIN_DATA)
         losses = {}
         # batch up the examples using spaCy's minibatch
-        batches = minibatch(TRAIN_DATA, size=compounding(4.0, 32.0, 1.001))
-        for batch in batches:
-            texts, annotations = zip(*batch)
+        for batch in minibatch(examples, size=compounding(4.0, 32.0, 1.001)):
             nlp.update(
-                texts,  # batch of texts
-                annotations,  # batch of annotations
+                batch,
                 drop=params["drop"],  # dropout - make it harder to memorise data
                 losses=losses,
             )
@@ -52,11 +53,9 @@ if __name__ == "__main__":
 
     # Log the spaCy model using mlflow
     mlflow.spacy.log_model(spacy_model=nlp, artifact_path="model")
-    model_uri = "runs:/{run_id}/{artifact_path}".format(
-        run_id=mlflow.active_run().info.run_id, artifact_path="model"
-    )
+    model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
 
-    print("Model saved in run %s" % mlflow.active_run().info.run_uuid)
+    print(f"Model saved in run {mlflow.active_run().info.run_uuid}")
 
     # Load the model using mlflow and use it to predict data
     nlp2 = mlflow.spacy.load_model(model_uri=model_uri)

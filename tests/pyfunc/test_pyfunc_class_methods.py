@@ -1,5 +1,5 @@
 import mlflow
-from mlflow.pyfunc import PythonModel, log_model, load_model
+from mlflow.pyfunc import PythonModel, load_model, log_model
 
 
 def test_unwrap_python_model_from_pyfunc_class():
@@ -8,7 +8,7 @@ def test_unwrap_python_model_from_pyfunc_class():
             self.param_1 = param_1
             self.param_2 = param_2
 
-        def predict(self, context, model_input):
+        def predict(self, context, model_input, params=None):
             return model_input + self.param_2
 
         def upper_param_1(self):
@@ -16,7 +16,7 @@ def test_unwrap_python_model_from_pyfunc_class():
 
     with mlflow.start_run():
         model = MyModel("this is test message", 2)
-        model_uri = log_model(python_model=model, artifact_path="mlruns").model_uri
+        model_uri = log_model("mlruns", python_model=model).model_uri
         loaded_model = load_model(model_uri).unwrap_python_model()
         assert isinstance(loaded_model, MyModel)
         assert loaded_model.param_1 == "this is test message"

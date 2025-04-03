@@ -1,38 +1,45 @@
-import os
-import pytest
-
-from sklearn import datasets
-import pandas as pd
-import numpy as np
 import json
+import os
 
-import mlflow
-
+import numpy as np
+import pandas as pd
+import pytest
 import tensorflow as tf
-from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import Dense, Input, Concatenate, Lambda
+from packaging.version import Version
+from pyspark.sql.functions import struct
+from sklearn import datasets
+from tensorflow.keras.layers import Concatenate, Dense, Input, Lambda
+from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.optimizers import SGD
 
+# Tensorflow >= 2.16 removed register_keras_serializable from
+# keras.utils and only export it from keras.saving.
+if Version(tf.__version__).release >= (2, 16):
+    from tensorflow.keras.saving import register_keras_serializable
+else:
+    from tensorflow.keras.utils import register_keras_serializable
 
-from mlflow.types.schema import Schema, TensorSpec
-from mlflow.models.signature import ModelSignature
-from mlflow.pyfunc import spark_udf
+import mlflow
 import mlflow.pyfunc.scoring_server as pyfunc_scoring_server
-from tests.helper_functions import (
-    pyfunc_serve_and_score_model,
-    expect_status_code,
-    _is_available_on_pypi,
-)
+from mlflow.models import ModelSignature
+from mlflow.models.utils import load_serving_example
+from mlflow.pyfunc import spark_udf
+from mlflow.types.schema import Schema, TensorSpec
 
-from pyspark.sql.functions import struct
+from tests.helper_functions import (
+    _is_available_on_pypi,
+    expect_status_code,
+    pyfunc_serve_and_score_model,
+)
+from tests.utils.test_file_utils import spark_session  # noqa: F401
 
 IS_TENSORFLOW_AVAILABLE = _is_available_on_pypi("tensorflow")
 EXTRA_PYFUNC_SERVING_TEST_ARGS = [] if IS_TENSORFLOW_AVAILABLE else ["--env-manager", "local"]
 
 
 @pytest.fixture
-def model_path(tmpdir):
-    return os.path.join(tmpdir.strpath, "model")
+def model_path(tmp_path):
+    return os.path.join(tmp_path, "model")
 
 
 @pytest.fixture(scope="module")
@@ -44,15 +51,6 @@ def data():
     y = data["target"]
     x = data.drop("target", axis=1)
     return x, y
-
-
-@pytest.fixture(scope="module")
-def spark_session():
-    from pyspark.sql import SparkSession
-
-    session = SparkSession.builder.master("local[2]").getOrCreate()
-    yield session
-    session.stop()
 
 
 @pytest.fixture(scope="module")
@@ -103,6 +101,10 @@ def single_multidim_tensor_input_model(data):
     x, y = data
     model = Sequential()
 
+    # This decorator injects the decorated class or function into the Keras custom
+    # object dictionary, so that it can be serialized and deserialized without
+    # needing an entry in the user-provided custom object dict.
+    @register_keras_serializable(name="f1")
     def f1(z):
         from tensorflow.keras import backend as K
 
@@ -134,13 +136,14 @@ def multi_multidim_tensor_input_model(data):
     input_a = Input(shape=(2, 3), name="a")
     input_b = Input(shape=(2, 5), name="b")
 
-    def f1(z):
+    @register_keras_serializable(name="f2")
+    def f2(z):
         from tensorflow.keras import backend as K
 
         return K.mean(z, axis=2)
 
-    input_a_sum = Lambda(f1)(input_a)
-    input_b_sum = Lambda(f1)(input_b)
+    input_a_sum = Lambda(f2)(input_a)
+    input_b_sum = Lambda(f2)(input_b)
 
     output = Dense(1)(Dense(3, input_dim=4)(Concatenate()([input_a_sum, input_b_sum])))
     model = Model(inputs=[input_a, input_b], outputs=output)
@@ -287,6 +290,10 @@ def test_model_multi_multidim_tensor_input(
 
 
 @pytest.mark.parametrize("env_manager", ["local", "virtualenv"])
+@pytest.mark.skipif(
+    Version(tf.__version__) in [Version("2.16.2"), Version("2.17.0")],
+    reason="model concurrent loading fails due to https://github.com/keras-team/keras/issues/19976",
+)
 def test_single_multidim_input_model_spark_udf(
     env_manager, single_multidim_tensor_input_model, spark_session, data
 ):
@@ -314,6 +321,10 @@ def test_single_multidim_input_model_spark_udf(
 
 
 @pytest.mark.parametrize("env_manager", ["local", "virtualenv"])
+@pytest.mark.skipif(
+    Version(tf.__version__) in [Version("2.16.2"), Version("2.17.0")],
+    reason="model loading fails due to https://github.com/keras-team/keras/issues/19976",
+)
 def test_multi_multidim_input_model_spark_udf(
     env_manager, multi_multidim_tensor_input_model, spark_session, data
 ):
@@ -360,21 +371,22 @@ def test_multi_multidim_input_model_spark_udf(
 
 
 def test_scoring_server_successfully_on_single_multidim_input_model(
-    single_multidim_tensor_input_model, model_path, data
+    single_multidim_tensor_input_model, data
 ):
     model, signature = single_multidim_tensor_input_model
-    mlflow.tensorflow.save_model(model, path=model_path, signature=signature)
-
     x, _ = data
-
     test_input = np.repeat(x.values[:, :, np.newaxis], 3, axis=2)
+    with mlflow.start_run():
+        model_info = mlflow.tensorflow.log_model(model, "model", input_example=test_input)
+    assert model_info.signature.inputs == signature.inputs
 
     inp_dict = json.dumps({"instances": test_input.tolist()})
     test_input_df = pd.DataFrame({"x": test_input.reshape((-1, 4 * 3)).tolist()})
+    serving_input_example = load_serving_example(model_info.model_uri)
 
-    for input_data in (inp_dict, test_input_df):
+    for input_data in (inp_dict, test_input_df, serving_input_example):
         response_records_content_type = pyfunc_serve_and_score_model(
-            model_uri=os.path.abspath(model_path),
+            model_uri=model_info.model_uri,
             data=input_data,
             content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON,
             extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,
@@ -383,10 +395,9 @@ def test_scoring_server_successfully_on_single_multidim_input_model(
 
 
 def test_scoring_server_successfully_on_multi_multidim_input_model(
-    multi_multidim_tensor_input_model, model_path, data
+    multi_multidim_tensor_input_model, data
 ):
     model, signature = multi_multidim_tensor_input_model
-    mlflow.tensorflow.save_model(model, path=model_path, signature=signature)
 
     x, _ = data
 
@@ -396,15 +407,21 @@ def test_scoring_server_successfully_on_multi_multidim_input_model(
     instances = [{"a": a.tolist(), "b": b.tolist()} for a, b in zip(input_a, input_b)]
 
     inp_dict = json.dumps({"instances": instances})
+    input_example = {"a": input_a, "b": input_b}
     test_input_df = pd.DataFrame(
         {
             "a": input_a.reshape((-1, 2 * 3)).tolist(),
             "b": input_b.reshape((-1, 2 * 5)).tolist(),
         }
     )
-    for input_data in (inp_dict, test_input_df):
+    with mlflow.start_run():
+        model_info = mlflow.tensorflow.log_model(model, "model", input_example=input_example)
+    assert model_info.signature.inputs == signature.inputs
+
+    serving_input_example = load_serving_example(model_info.model_uri)
+    for input_data in (inp_dict, test_input_df, serving_input_example):
         response_records_content_type = pyfunc_serve_and_score_model(
-            model_uri=os.path.abspath(model_path),
+            model_uri=model_info.model_uri,
             data=input_data,
             content_type=pyfunc_scoring_server.CONTENT_TYPE_JSON,
             extra_args=EXTRA_PYFUNC_SERVING_TEST_ARGS,

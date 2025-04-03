@@ -29,8 +29,43 @@ module.exports = async ({ context, github }) => {
   const { user, body } = context.payload.pull_request;
   const messages = [];
 
+  const title = "&#x1F6E0 DevTools &#x1F6E0";
+  if (body && !body.includes(title)) {
+    const codespacesBadge = `[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/${user.login}/mlflow/pull/${issue_number}?quickstart=1)`;
+    const newSection = `
+<details><summary>${title}</summary>
+<p>
+
+${codespacesBadge}
+
+#### Install mlflow from this PR
+
+\`\`\`
+# mlflow
+pip install git+https://github.com/mlflow/mlflow.git@refs/pull/${issue_number}/merge
+# mlflow-skinny
+pip install git+https://github.com/mlflow/mlflow.git@refs/pull/${issue_number}/merge#subdirectory=skinny
+\`\`\`
+
+For Databricks, use the following command:
+
+\`\`\`
+%sh curl -LsSf https://raw.githubusercontent.com/mlflow/mlflow/HEAD/dev/install-skinny.sh | sh -s ${issue_number}
+\`\`\`
+
+</p>
+</details>
+`.trim();
+    await github.rest.pulls.update({
+      owner,
+      repo,
+      pull_number: issue_number,
+      body: `${newSection}\n\n${body}`,
+    });
+  }
+
   const dcoCheck = await getDcoCheck(github, owner, repo, sha);
-  if (dcoCheck.conclusion !== "success") {
+  if (dcoCheck && dcoCheck.conclusion !== "success") {
     messages.push(
       "#### &#x26a0; DCO check\n\n" +
         "The DCO check failed. " +
@@ -49,7 +84,7 @@ module.exports = async ({ context, github }) => {
     );
   }
 
-  if (!body.includes("How should the PR be classified in the release notes?")) {
+  if (!(body || "").includes("How should the PR be classified in the release notes?")) {
     messages.push(
       "#### &#x26a0; Invalid PR template\n\n" +
         "This PR does not appear to have been filed using the MLflow PR template. " +

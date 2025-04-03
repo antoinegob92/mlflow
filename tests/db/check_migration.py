@@ -9,6 +9,7 @@ python tests/db/check_migration.py pre-migration
 # post migration
 python tests/db/check_migration.py post-migration
 """
+
 import os
 import uuid
 from pathlib import Path
@@ -18,20 +19,20 @@ import pandas as pd
 import sqlalchemy as sa
 
 import mlflow
+from mlflow.store.model_registry.dbmodels.models import (
+    SqlModelVersion,
+    SqlModelVersionTag,
+    SqlRegisteredModel,
+    SqlRegisteredModelTag,
+)
 from mlflow.store.tracking.dbmodels.models import (
     SqlExperiment,
-    SqlRun,
-    SqlMetric,
-    SqlParam,
-    SqlTag,
     SqlExperimentTag,
     SqlLatestMetric,
-)
-from mlflow.store.model_registry.dbmodels.models import (
-    SqlRegisteredModel,
-    SqlModelVersion,
-    SqlRegisteredModelTag,
-    SqlModelVersionTag,
+    SqlMetric,
+    SqlParam,
+    SqlRun,
+    SqlTag,
 )
 
 TABLES = [
@@ -51,7 +52,7 @@ SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 
 
 class Model(mlflow.pyfunc.PythonModel):
-    def predict(self, context, model_input):
+    def predict(self, context, model_input, params=None):
         return [0]
 
 
@@ -62,7 +63,7 @@ def log_everything():
         mlflow.log_params({"param": "value"})
         mlflow.log_metrics({"metric": 0.1})
         mlflow.set_tags({"tag": "run"})
-        model_info = mlflow.pyfunc.log_model(python_model=Model(), artifact_path="model")
+        model_info = mlflow.pyfunc.log_model("model", python_model=Model())
 
     client = mlflow.MlflowClient()
     registered_model_name = uuid.uuid4().hex
@@ -96,7 +97,7 @@ def pre_migration(verbose):
     SNAPSHOTS_DIR.mkdir(exist_ok=True)
     with connect_to_mlflow_db() as conn:
         for table in TABLES:
-            df = pd.read_sql(f"SELECT * FROM {table}", conn)
+            df = pd.read_sql(sa.text(f"SELECT * FROM {table}"), conn)
             df.to_pickle(SNAPSHOTS_DIR / f"{table}.pkl")
             if verbose:
                 click.secho(f"\n{table}\n", fg="blue")
@@ -107,9 +108,9 @@ def pre_migration(verbose):
 def post_migration():
     with connect_to_mlflow_db() as conn:
         for table in TABLES:
-            df_actual = pd.read_sql(f"SELECT * FROM {table}", conn)
+            df_actual = pd.read_sql(sa.text(f"SELECT * FROM {table}"), conn)
             df_expected = pd.read_pickle(SNAPSHOTS_DIR / f"{table}.pkl")
-            pd.testing.assert_frame_equal(df_actual, df_expected)
+            pd.testing.assert_frame_equal(df_actual[df_expected.columns], df_expected)
 
 
 if __name__ == "__main__":

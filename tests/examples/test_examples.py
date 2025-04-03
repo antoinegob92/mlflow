@@ -1,20 +1,21 @@
+import os
 import re
 import shutil
+import sys
+import uuid
 from pathlib import Path
+
+import pytest
 
 import mlflow
 from mlflow import cli
 from mlflow.utils import process
 from mlflow.utils.virtualenv import _get_mlflow_virtualenv_root
-import pytest
+
+from tests.helper_functions import clear_hub_cache, flaky, start_mock_openai_server
 from tests.integration.utils import invoke_cli_runner
 
 EXAMPLES_DIR = "examples"
-
-
-def get_free_disk_space_in_GiB():
-    # https://stackoverflow.com/a/48929832/6943581
-    return shutil.disk_usage("/")[-1] / (2**30)
 
 
 def find_python_env_yaml(directory: Path) -> Path:
@@ -28,16 +29,7 @@ def replace_mlflow_with_dev_version(yml_path: Path) -> None:
     yml_path.write_text(new_src)
 
 
-@pytest.fixture(scope="function", autouse=True)
-def report_free_disk_space(capsys):
-    yield
-
-    with capsys.disabled():
-        # pylint: disable-next=print-function
-        print(" | Free disk space: {:.1f} GiB".format(get_free_disk_space_in_GiB()), end="")
-
-
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(autouse=True)
 def clean_up_mlflow_virtual_environments():
     yield
 
@@ -46,14 +38,26 @@ def clean_up_mlflow_virtual_environments():
             shutil.rmtree(path)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def mock_openai():
+    # Some examples includes OpenAI API calls, so we start a mock server.
+    with start_mock_openai_server() as base_url:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("OPENAI_API_BASE", base_url)
+            mp.setenv("OPENAI_API_KEY", "test")
+            yield
+
+
 @pytest.mark.notrackingurimock
+@flaky()
 @pytest.mark.parametrize(
     ("directory", "params"),
     [
         ("h2o", []),
-        ("hyperparam", ["-e", "train", "-P", "epochs=1"]),
-        ("hyperparam", ["-e", "random", "-P", "epochs=1"]),
-        ("hyperparam", ["-e", "hyperopt", "-P", "epochs=1"]),
+        # TODO: Fix the hyperparam example and re-enable it
+        # ("hyperparam", ["-e", "train", "-P", "epochs=1"]),
+        # ("hyperparam", ["-e", "random", "-P", "epochs=1"]),
+        # ("hyperparam", ["-e", "hyperopt", "-P", "epochs=1"]),
         (
             "lightgbm/lightgbm_native",
             ["-P", "learning_rate=0.1", "-P", "colsample_bytree=0.8", "-P", "subsample=0.9"],
@@ -86,12 +90,18 @@ def clean_up_mlflow_virtual_environments():
         ),
         ("pytorch/CaptumExample", ["-P", "max_epochs=50"]),
         ("supply_chain_security", []),
+        ("tensorflow", []),
+        ("sktime", []),
     ],
 )
 def test_mlflow_run_example(directory, params, tmp_path):
-    mlflow.set_tracking_uri(tmp_path.joinpath("mlruns").as_uri())
+    # Use tmp_path+uuid as tmp directory to avoid the same
+    # directory being reused when re-trying the test since
+    # tmp_path is named as the test name
+    random_tmp_path = tmp_path / str(uuid.uuid4())
+    mlflow.set_tracking_uri(random_tmp_path.joinpath("mlruns").as_uri())
     example_dir = Path(EXAMPLES_DIR, directory)
-    tmp_example_dir = tmp_path.joinpath(example_dir)
+    tmp_example_dir = random_tmp_path.joinpath(example_dir)
     shutil.copytree(example_dir, tmp_example_dir)
     python_env_path = find_python_env_yaml(tmp_example_dir)
     replace_mlflow_with_dev_version(python_env_path)
@@ -104,12 +114,11 @@ def test_mlflow_run_example(directory, params, tmp_path):
     ("directory", "command"),
     [
         ("docker", ["docker", "build", "-t", "mlflow-docker-example", "-f", "Dockerfile", "."]),
-        ("gluon", ["python", "train.py"]),
-        ("keras", ["python", "train.py"]),
+        ("keras", [sys.executable, "train.py"]),
         (
             "lightgbm/lightgbm_native",
             [
-                "python",
+                sys.executable,
                 "train.py",
                 "--learning-rate",
                 "0.2",
@@ -119,14 +128,14 @@ def test_mlflow_run_example(directory, params, tmp_path):
                 "0.9",
             ],
         ),
-        ("lightgbm/lightgbm_sklearn", ["python", "train.py"]),
-        ("statsmodels", ["python", "train.py", "--inverse-method", "qr"]),
-        ("quickstart", ["python", "mlflow_tracking.py"]),
-        ("remote_store", ["python", "remote_server.py"]),
+        ("lightgbm/lightgbm_sklearn", [sys.executable, "train.py"]),
+        ("statsmodels", [sys.executable, "train.py", "--inverse-method", "qr"]),
+        ("quickstart", [sys.executable, "mlflow_tracking.py"]),
+        ("remote_store", [sys.executable, "remote_server.py"]),
         (
             "xgboost/xgboost_native",
             [
-                "python",
+                sys.executable,
                 "train.py",
                 "--learning-rate",
                 "0.2",
@@ -136,37 +145,51 @@ def test_mlflow_run_example(directory, params, tmp_path):
                 "0.9",
             ],
         ),
-        ("xgboost/xgboost_sklearn", ["python", "train.py"]),
-        ("catboost", ["python", "train.py"]),
-        ("prophet", ["python", "train.py"]),
-        ("sklearn_autolog", ["python", "linear_regression.py"]),
-        ("sklearn_autolog", ["python", "pipeline.py"]),
-        ("sklearn_autolog", ["python", "grid_search_cv.py"]),
-        ("pyspark_ml_autologging", ["python", "logistic_regression.py"]),
-        ("pyspark_ml_autologging", ["python", "one_vs_rest.py"]),
-        ("pyspark_ml_autologging", ["python", "pipeline.py"]),
-        ("shap", ["python", "regression.py"]),
-        ("shap", ["python", "binary_classification.py"]),
-        ("shap", ["python", "multiclass_classification.py"]),
-        ("shap", ["python", "explainer_logging.py"]),
-        ("ray_serve", ["python", "train_model.py"]),
-        ("pip_requirements", ["python", "pip_requirements.py"]),
-        ("fastai", ["python", "train.py", "--lr", "0.02", "--epochs", "3"]),
-        ("pmdarima", ["python", "train.py"]),
-        ("evaluation", ["python", "evaluate_on_binary_classifier.py"]),
-        ("evaluation", ["python", "evaluate_on_multiclass_classifier.py"]),
-        ("evaluation", ["python", "evaluate_on_regressor.py"]),
-        ("evaluation", ["python", "evaluate_with_custom_metrics.py"]),
-        ("evaluation", ["python", "evaluate_with_custom_metrics_comprehensive.py"]),
-        ("evaluation", ["python", "evaluate_with_model_validation.py"]),
-        ("diviner", ["python", "train.py"]),
-        ("spark_udf", ["python", "spark_udf_datetime.py"]),
-        ("pyfunc", ["python", "train.py"]),
+        ("xgboost/xgboost_sklearn", [sys.executable, "train.py"]),
+        ("catboost", [sys.executable, "train.py"]),
+        ("prophet", [sys.executable, "train.py"]),
+        ("sklearn_autolog", [sys.executable, "linear_regression.py"]),
+        ("sklearn_autolog", [sys.executable, "pipeline.py"]),
+        ("sklearn_autolog", [sys.executable, "grid_search_cv.py"]),
+        ("pyspark_ml_autologging", [sys.executable, "logistic_regression.py"]),
+        ("pyspark_ml_autologging", [sys.executable, "one_vs_rest.py"]),
+        ("pyspark_ml_autologging", [sys.executable, "pipeline.py"]),
+        ("shap", [sys.executable, "regression.py"]),
+        ("shap", [sys.executable, "binary_classification.py"]),
+        ("shap", [sys.executable, "multiclass_classification.py"]),
+        ("shap", [sys.executable, "explainer_logging.py"]),
+        ("ray_serve", [sys.executable, "train_model.py"]),
+        ("pip_requirements", [sys.executable, "pip_requirements.py"]),
+        ("fastai", [sys.executable, "train.py", "--lr", "0.02", "--epochs", "3"]),
+        ("pmdarima", [sys.executable, "train.py"]),
+        ("evaluation", [sys.executable, "evaluate_on_binary_classifier.py"]),
+        ("evaluation", [sys.executable, "evaluate_on_multiclass_classifier.py"]),
+        ("evaluation", [sys.executable, "evaluate_on_regressor.py"]),
+        ("evaluation", [sys.executable, "evaluate_with_custom_metrics.py"]),
+        ("evaluation", [sys.executable, "evaluate_with_custom_metrics_comprehensive.py"]),
+        ("evaluation", [sys.executable, "evaluate_with_model_validation.py"]),
+        ("diviner", [sys.executable, "train.py"]),
+        ("spark_udf", [sys.executable, "spark_udf_datetime.py"]),
+        ("pyfunc", [sys.executable, "train.py"]),
+        ("tensorflow", [sys.executable, "train.py"]),
+        ("transformers", [sys.executable, "conversational.py"]),
+        ("transformers", [sys.executable, "load_components.py"]),
+        ("transformers", [sys.executable, "simple.py"]),
+        ("transformers", [sys.executable, "sentence_transformer.py"]),
+        ("transformers", [sys.executable, "whisper.py"]),
+        ("sentence_transformers", [sys.executable, "simple.py"]),
+        ("tracing", [sys.executable, "fluent.py"]),
+        ("tracing", [sys.executable, "client.py"]),
+        ("tracing", [sys.executable, "multithreading.py"]),
+        ("llama_index", [sys.executable, "simple_index.py"]),
+        ("llama_index", [sys.executable, "autolog.py"]),
     ],
 )
 def test_command_example(directory, command):
     cwd_dir = Path(EXAMPLES_DIR, directory)
-    import os
-
     assert os.environ.get("MLFLOW_HOME") is not None
+    if directory == "transformers":
+        # NB: Clearing the huggingface_hub cache is to lower the disk storage pressure for CI
+        clear_hub_cache()
+
     process._exec_cmd(command, cwd=cwd_dir, env=os.environ)

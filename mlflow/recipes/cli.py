@@ -1,13 +1,12 @@
 import click
 
-from mlflow.recipes.utils import _RECIPE_PROFILE_ENV_VAR
+from mlflow.environment_variables import MLFLOW_RECIPES_PROFILE
 from mlflow.recipes import Recipe
-from mlflow.utils.annotations import experimental
 
 _CLI_ARG_RECIPE_PROFILE = click.option(
     "--profile",
     "-p",
-    envvar=_RECIPE_PROFILE_ENV_VAR,
+    envvar=MLFLOW_RECIPES_PROFILE.name,
     type=click.STRING,
     default=None,
     required=True,
@@ -22,9 +21,10 @@ _CLI_ARG_RECIPE_PROFILE = click.option(
 @click.group("recipes")
 def commands():
     """
+    MLflow Recipes is deprecated and will be removed in MLflow 3.0.
+
     Run MLflow Recipes and inspect recipe results.
     """
-    pass
 
 
 @commands.command(short_help="Run the full recipe or a particular recipe step.")
@@ -37,7 +37,6 @@ def commands():
     help="The name of the recipe step to run.",
 )
 @_CLI_ARG_RECIPE_PROFILE
-@experimental("command")
 def run(step, profile):
     """
     Run the full recipe, or run a particular recipe step if specified, producing
@@ -61,7 +60,6 @@ def run(step, profile):
     help="The name of the recipe step for which to remove cached outputs.",
 )
 @_CLI_ARG_RECIPE_PROFILE
-@experimental("command")
 def clean(step, profile):
     """
     Remove all recipe outputs from the cache, or remove the cached outputs of a particular
@@ -85,7 +83,6 @@ def clean(step, profile):
     help="The name of the recipe step to inspect.",
 )
 @_CLI_ARG_RECIPE_PROFILE
-@experimental("command")
 def inspect(step, profile):
     """
     Display a visual overview of the recipe graph, or display a summary of results from a
@@ -105,7 +102,6 @@ def inspect(step, profile):
     help="The name of the artifact to retrieve.",
 )
 @_CLI_ARG_RECIPE_PROFILE
-@experimental("command")
 def get_artifact(profile, artifact):
     """
     Get the location of an artifact output from the recipe.

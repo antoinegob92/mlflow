@@ -1,21 +1,20 @@
 import pathlib
 import uuid
-import os
+from collections import namedtuple
+from typing import NamedTuple
 from unittest import mock
 
 import pytest
 
 import mlflow
 from mlflow.exceptions import MlflowException
-from mlflow.utils.file_utils import path_to_local_file_uri, mkdir, local_file_uri_to_path
-from collections import namedtuple
+from mlflow.utils.file_utils import mkdir, path_to_local_file_uri
 from mlflow.utils.os import is_windows
-
 
 Artifact = namedtuple("Artifact", ["uri", "content"])
 
 
-@pytest.fixture()
+@pytest.fixture
 def run_with_artifact(tmp_path):
     artifact_path = "test"
     artifact_content = "content"
@@ -25,6 +24,23 @@ def run_with_artifact(tmp_path):
         mlflow.log_artifact(local_path, artifact_path)
 
     return (run, artifact_path, artifact_content)
+
+
+@pytest.fixture
+def run_with_artifacts(tmp_path):
+    artifact_path = "test"
+    artifact_content = "content"
+
+    local_dir = tmp_path / "dir"
+    local_dir.mkdir()
+    local_dir.joinpath("file.txt").write_text(artifact_content)
+    local_dir.joinpath("subdir").mkdir()
+    local_dir.joinpath("subdir").joinpath("text.txt").write_text(artifact_content)
+
+    with mlflow.start_run() as run:
+        mlflow.log_artifact(local_dir, artifact_path)
+
+    return (run, artifact_path)
 
 
 def test_download_artifacts_with_uri(run_with_artifact):
@@ -78,7 +94,7 @@ def test_download_artifacts_throws_for_invalid_arguments():
         mlflow.artifacts.download_artifacts(artifact_path="path", artifact_uri="uri")
 
 
-@pytest.fixture()
+@pytest.fixture
 def run_with_text_artifact():
     artifact_path = "test/file.txt"
     artifact_content = "This is a sentence"
@@ -89,7 +105,7 @@ def run_with_text_artifact():
     return Artifact(artifact_uri, artifact_content)
 
 
-@pytest.fixture()
+@pytest.fixture
 def run_with_json_artifact():
     artifact_path = "test/config.json"
     artifact_content = {"mlflow-version": "0.28", "n_cores": "10"}
@@ -100,7 +116,7 @@ def run_with_json_artifact():
     return Artifact(artifact_uri, artifact_content)
 
 
-@pytest.fixture()
+@pytest.fixture
 def run_with_image_artifact():
     from PIL import Image
 
@@ -144,16 +160,19 @@ def test_load_image_invalid_image(run_with_text_artifact):
         mlflow.artifacts.load_image(artifact.uri)
 
 
-@pytest.fixture()
+class ArtifactReturnType(NamedTuple):
+    tmp_path: pathlib.Path
+    artifact_path: pathlib.Path
+    artifact_name: str
+
+
+@pytest.fixture
 def text_artifact(tmp_path):
     artifact_name = "test.txt"
     artifacts_root_tmp = mkdir(tmp_path.joinpath(str(uuid.uuid4())))
     test_artifact_path = artifacts_root_tmp.joinpath(artifact_name)
     test_artifact_path.write_text("test")
-    artifact_return_type = namedtuple(
-        "artifact_return_type", ["tmp_path", "artifact_path", "artifact_name"]
-    )
-    return artifact_return_type(artifacts_root_tmp, test_artifact_path, artifact_name)
+    return ArtifactReturnType(artifacts_root_tmp, test_artifact_path, artifact_name)
 
 
 def _assert_artifact_uri(tracking_uri, expected_artifact_uri, test_artifact, run_id):
@@ -164,15 +183,16 @@ def _assert_artifact_uri(tracking_uri, expected_artifact_uri, test_artifact, run
     assert artifact_uri == expected_artifact_uri
 
 
-def test_default_relative_artifact_uri_resolves(text_artifact):
+def test_default_relative_artifact_uri_resolves(text_artifact, tmp_path, monkeypatch):
     tracking_uri = path_to_local_file_uri(text_artifact.tmp_path.joinpath("mlruns"))
     mlflow.set_tracking_uri(tracking_uri)
+    monkeypatch.chdir(tmp_path)
     experiment_id = mlflow.create_experiment("test_exp_a", "test_artifacts_root")
     with mlflow.start_run(experiment_id=experiment_id) as run:
         _assert_artifact_uri(
             tracking_uri,
             str(
-                pathlib.Path.cwd().joinpath(
+                tmp_path.joinpath(
                     "test_artifacts_root",
                     run.info.run_id,
                     "artifacts",
@@ -203,29 +223,25 @@ def test_custom_relative_artifact_uri_resolves(text_artifact):
         )
 
 
-def test_artifact_logging_resolution_works_with_non_root_working_directory(text_artifact):
-    original_cwd = pathlib.Path.cwd()
-    new_cwd = text_artifact.tmp_path.joinpath("some_location")
-    new_cwd.mkdir()
-    tracking_uri = mlflow.get_tracking_uri()
+def test_artifact_logging_resolution_works_with_non_root_working_directory(tmp_path, monkeypatch):
+    text_file = tmp_path.joinpath("test.txt")
+    text_file.write_text("test")
+    cwd = tmp_path.joinpath("cwd")
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
     experiment_id = mlflow.create_experiment("test_exp_c", "some_path")
-    os.chdir(new_cwd)
+    not_cwd = tmp_path.joinpath("not_cwd")
+    not_cwd.mkdir()
+    monkeypatch.chdir(not_cwd)
 
+    tracking_uri = mlflow.get_tracking_uri()
     with mlflow.start_run(experiment_id=experiment_id) as run:
         _assert_artifact_uri(
             tracking_uri,
-            str(
-                original_cwd.joinpath(
-                    "some_path",
-                    run.info.run_id,
-                    "artifacts",
-                    text_artifact.artifact_name,
-                )
-            ),
-            text_artifact,
+            str(cwd.joinpath("some_path", run.info.run_id, "artifacts", text_file.name)),
+            ArtifactReturnType(tmp_path, text_file, text_file.name),
             run.info.run_id,
         )
-    os.chdir(original_cwd)
 
 
 @pytest.mark.skipif(not is_windows(), reason="This test only passes on Windows")
@@ -235,9 +251,10 @@ def test_log_artifact_windows_path_with_hostname(text_artifact):
         "test_exp_d", experiment_test_1_artifact_location
     )
     with mlflow.start_run(experiment_id=experiment_test_1_id) as run:
-        with mock.patch("shutil.copyfile") as copyfile_mock, mock.patch(
-            "os.path.exists", return_value=True
-        ) as exists_mock:
+        with (
+            mock.patch("shutil.copy2") as copyfile_mock,
+            mock.patch("os.path.exists", return_value=True) as exists_mock,
+        ):
             mlflow.log_artifact(text_artifact.artifact_path)
             copyfile_mock.assert_called_once()
             exists_mock.assert_called_once()
@@ -249,22 +266,50 @@ def test_log_artifact_windows_path_with_hostname(text_artifact):
                 rf"\artifacts\{text_artifact.artifact_name}" == local_path
             )
 
-    experiment_test_2_artifact_location = "file://my_server/my_path/my_sub_path"
-    experiment_test_2_id = mlflow.create_experiment(
-        "test_exp_e", experiment_test_2_artifact_location
-    )
-    with mlflow.start_run(experiment_id=experiment_test_2_id) as run:
-        with mock.patch("shutil.copyfile") as copyfile_mock, mock.patch(
-            "os.path.exists", return_value=True
-        ) as exists_mock:
-            mlflow.log_artifact(text_artifact.artifact_path)
-            copyfile_mock.assert_called_once()
-            exists_mock.assert_called_once()
-            local_path = mlflow.artifacts.download_artifacts(
-                run_id=run.info.run_id, artifact_path=text_artifact.artifact_name
-            )
-            assert (
-                local_file_uri_to_path(experiment_test_2_artifact_location)
-                + rf"\{run.info.run_id}\artifacts\{text_artifact.artifact_name}"
-                == local_path
-            )
+
+def test_list_artifacts_with_artifact_uri(run_with_artifacts):
+    run, artifact_path = run_with_artifacts
+    run_uri = f"runs:/{run.info.run_id}/{artifact_path}"
+    actual_uri = str(pathlib.PurePosixPath(run.info.artifact_uri) / artifact_path)
+    for uri in (run_uri, actual_uri):
+        artifacts = mlflow.artifacts.list_artifacts(artifact_uri=uri)
+        assert len(artifacts) == 1
+        assert artifacts[0].path == f"{artifact_path}/dir"
+
+        artifacts = mlflow.artifacts.list_artifacts(artifact_uri=f"{uri}/dir")
+        assert len(artifacts) == 2
+        assert artifacts[0].path == "dir/file.txt"
+        assert artifacts[1].path == "dir/subdir"
+
+        artifacts = mlflow.artifacts.list_artifacts(artifact_uri=f"{uri}/dir/subdir")
+        assert len(artifacts) == 1
+        assert artifacts[0].path == "subdir/text.txt"
+
+        artifacts = mlflow.artifacts.list_artifacts(artifact_uri=f"{uri}/non-exist-path")
+        assert len(artifacts) == 0
+
+
+def test_list_artifacts_with_run_id(run_with_artifacts):
+    run, artifact_path = run_with_artifacts
+    artifacts = mlflow.artifacts.list_artifacts(run_id=run.info.run_id)
+    assert len(artifacts) == 1
+    assert artifacts[0].path == artifact_path
+
+    artifacts = mlflow.artifacts.list_artifacts(run_id=run.info.run_id, artifact_path=artifact_path)
+    assert len(artifacts) == 1
+    assert artifacts[0].path == f"{artifact_path}/dir"
+
+
+def test_list_artifacts_throws_for_invalid_arguments():
+    with pytest.raises(MlflowException, match="Exactly one of"):
+        mlflow.artifacts.list_artifacts(
+            artifact_uri="uri",
+            run_id="run_id",
+            artifact_path="path",
+        )
+
+    with pytest.raises(MlflowException, match="Exactly one of"):
+        mlflow.artifacts.list_artifacts()
+
+    with pytest.raises(MlflowException, match="`artifact_path` cannot be specified"):
+        mlflow.artifacts.list_artifacts(artifact_uri="uri", artifact_path="path")

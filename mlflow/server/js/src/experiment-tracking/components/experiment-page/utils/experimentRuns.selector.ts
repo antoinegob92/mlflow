@@ -3,12 +3,16 @@ import {
   ExperimentStoreEntities,
   KeyValueEntity,
   LIFECYCLE_FILTER,
-  ModelInfoEntity,
+  ModelVersionInfoEntity,
   MODEL_VERSION_FILTER,
+  DatasetSummary,
   RunInfoEntity,
+  RunDatasetWithTags,
+  MetricEntity,
 } from '../../../types';
 import { getLatestMetrics } from '../../../reducers/MetricReducer';
-import { getExperimentTags, getParams, getRunInfo, getRunTags } from '../../../reducers/Reducers';
+import { getExperimentTags, getParams, getRunDatasets, getRunInfo, getRunTags } from '../../../reducers/Reducers';
+import { pickBy } from 'lodash';
 
 export type ExperimentRunsSelectorResult = {
   /**
@@ -36,7 +40,7 @@ export type ExperimentRunsSelectorResult = {
    * Example: metricsList[2] contains list of all
    * metrics corresponding to the 3rd run in the run list
    */
-  metricsList: KeyValueEntity[][];
+  metricsList: MetricEntity[][];
 
   /**
    * List of metrics indexed by the respective runs.
@@ -55,19 +59,28 @@ export type ExperimentRunsSelectorResult = {
   /**
    * Dictionary containing model information objects indexed by run uuid
    */
-  modelVersionsByRunUuid: Record<string, ModelInfoEntity[]>;
+  modelVersionsByRunUuid: Record<string, ModelVersionInfoEntity[]>;
 
   /**
    * Dictionary containing all tags assigned to a experiment
    * (single experiment only)
    */
   experimentTags: Record<string, KeyValueEntity>;
+
+  /**
+   * List of dataset arrays indexed by the respective runs.
+   * E.g. datasetsList[2] yields an array of all
+   * datasets corresponding to the 3rd run in the run list
+   */
+  datasetsList: RunDatasetWithTags[][];
 };
 
 export type ExperimentRunsSelectorParams = {
   experiments: ExperimentEntity[];
+  experimentIds?: string[];
   lifecycleFilter?: LIFECYCLE_FILTER;
   modelVersionFilter?: MODEL_VERSION_FILTER;
+  datasetsFilter?: DatasetSummary[];
 };
 
 /**
@@ -79,6 +92,7 @@ const extractRunInfos = (
   {
     lifecycleFilter = LIFECYCLE_FILTER.ACTIVE,
     modelVersionFilter = MODEL_VERSION_FILTER.ALL_RUNS,
+    datasetsFilter = [],
   }: ExperimentRunsSelectorParams,
 ): RunInfoEntity[] => {
   const { modelVersionsByRunUuid } = state.entities;
@@ -86,28 +100,42 @@ const extractRunInfos = (
   return (
     runUuids
       // Get the basic run info
-      .map((run_id) => getRunInfo(run_id, state))
+      .map((run_id) => [getRunInfo(run_id, state), getRunDatasets(run_id, state)])
       // Filter out runs by given lifecycle filter
-      .filter((rInfo) => {
+      .filter(([rInfo, _]) => {
         if (lifecycleFilter === LIFECYCLE_FILTER.ACTIVE) {
-          return rInfo.lifecycle_stage === 'active';
+          return rInfo.lifecycleStage === 'active';
         } else {
-          return rInfo.lifecycle_stage === 'deleted';
+          return rInfo.lifecycleStage === 'deleted';
         }
       })
       // Filter out runs by given model version filter
-      .filter((rInfo) => {
+      .filter(([rInfo, _]) => {
         if (modelVersionFilter === MODEL_VERSION_FILTER.ALL_RUNS) {
           return true;
         } else if (modelVersionFilter === MODEL_VERSION_FILTER.WITH_MODEL_VERSIONS) {
-          return rInfo.run_uuid in modelVersionsByRunUuid;
+          return rInfo.runUuid in modelVersionsByRunUuid;
         } else if (modelVersionFilter === MODEL_VERSION_FILTER.WTIHOUT_MODEL_VERSIONS) {
-          return !(rInfo.run_uuid in modelVersionsByRunUuid);
+          return !(rInfo.runUuid in modelVersionsByRunUuid);
         } else {
+          // eslint-disable-next-line no-console -- TODO(FEINF-3587)
           console.warn('Invalid input to model version filter - defaulting to showing all runs.');
           return true;
         }
       })
+      .filter(([_, datasets]) => {
+        if (!datasetsFilter || datasetsFilter.length === 0) return true;
+        if (!datasets) return false;
+
+        // Returns true if there exists a dataset that is in datasetsFilter
+        return datasets.some((datasetWithTags: RunDatasetWithTags) => {
+          const datasetName = datasetWithTags.dataset.name;
+          const datasetDigest = datasetWithTags.dataset.digest;
+
+          return datasetsFilter.some(({ name, digest }) => name === datasetName && digest === datasetDigest);
+        });
+      })
+      .map(([rInfo, _]) => rInfo)
   );
 };
 
@@ -116,15 +144,21 @@ export const experimentRunsSelector = (
   params: ExperimentRunsSelectorParams,
 ): ExperimentRunsSelectorResult => {
   const { experiments } = params;
-  const experimentIds = experiments.map((e) => e.experiment_id);
+  const experimentIds = params.experimentIds || experiments.map((e) => e.experimentId);
   const comparingExperiments = experimentIds.length > 1;
+
+  // Read the order of runs from array of UUIDs in the store, because otherwise the order when
+  // reading from the object is not guaranteed. This is important when we are trying to sort runs by
+  // metrics and other fields.
+  const runOrder = state.entities.runInfoOrderByUuid || [];
+  const runs = runOrder.map((runUuid) => state.entities.runInfosByUuid[runUuid]);
 
   /**
    * Extract run UUIDs relevant to selected experiments
    */
-  const runUuids = Object.values(state.entities.runInfosByUuid)
-    .filter(({ experiment_id }) => experimentIds.includes(experiment_id))
-    .map(({ run_uuid }) => run_uuid);
+  const runUuids = runs
+    .filter(({ experimentId }) => experimentIds.includes(experimentId))
+    .map(({ runUuid }) => runUuid);
 
   /**
    * Extract model version and runs matching filter directly from the store
@@ -146,23 +180,31 @@ export const experimentRunsSelector = (
    */
   const paramKeysSet = new Set<string>();
 
+  const datasetsList = runInfos.map((runInfo) => {
+    return state.entities.runDatasetsByUuid[runInfo.runUuid];
+  });
+
   /**
    * Extracting lists of metrics by run index
    */
   const metricsList = runInfos.map((runInfo) => {
-    const metricsByRunUuid = getLatestMetrics(runInfo.run_uuid, state);
-    const metrics = Object.values(metricsByRunUuid || {}) as any[];
+    const metricsByRunUuid = getLatestMetrics(runInfo.runUuid, state);
+    const metrics = (Object.values(metricsByRunUuid || {}) as any[]).filter(
+      (metric) => metric.key.trim().length > 0, // Filter out metrics that are entirely whitespace
+    );
     metrics.forEach((metric) => {
       metricKeysSet.add(metric.key);
     });
     return metrics;
-  }) as KeyValueEntity[][];
+  }) as MetricEntity[][];
 
   /**
    * Extracting lists of params by run index
    */
   const paramsList = runInfos.map((runInfo) => {
-    const paramValues = Object.values(getParams(runInfo.run_uuid, state)) as any[];
+    const paramValues = (Object.values(getParams(runInfo.runUuid, state)) as any[]).filter(
+      (param) => param.key.trim().length > 0, // Filter out params that are entirely whitespace
+    );
     paramValues.forEach((param) => {
       paramKeysSet.add(param.key);
     });
@@ -172,19 +214,22 @@ export const experimentRunsSelector = (
   /**
    * Extracting dictionaries of tags by run index
    */
-  const tagsList = runInfos.map((runInfo) => getRunTags(runInfo.run_uuid, state)) as Record<
-    string,
-    KeyValueEntity
-  >[];
+  const tagsList = runInfos.map((runInfo) =>
+    pickBy(
+      getRunTags(runInfo.runUuid, state),
+      (tags) => tags.key.trim().length > 0, // Filter out tags that are entirely whitespace
+    ),
+  ) as Record<string, KeyValueEntity>[];
 
   const firstExperimentId = experimentIds[0];
 
   /**
    * If there is only one experiment, extract experiment tags as well
    */
-  const experimentTags = (
-    comparingExperiments ? {} : getExperimentTags(firstExperimentId, state)
-  ) as Record<string, KeyValueEntity>;
+  const experimentTags = (comparingExperiments ? {} : getExperimentTags(firstExperimentId, state)) as Record<
+    string,
+    KeyValueEntity
+  >;
 
   return {
     modelVersionsByRunUuid,
@@ -194,6 +239,7 @@ export const experimentRunsSelector = (
     tagsList,
     metricsList,
     runUuidsMatchingFilter,
+    datasetsList,
     metricKeyList: Array.from(metricKeysSet.values()).sort(),
     paramKeyList: Array.from(paramKeysSet.values()).sort(),
   };

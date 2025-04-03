@@ -1,24 +1,25 @@
 from sqlalchemy import (
-    Column,
-    String,
-    ForeignKey,
-    Integer,
     BigInteger,
-    PrimaryKeyConstraint,
+    Column,
+    ForeignKey,
     ForeignKeyConstraint,
+    Integer,
+    PrimaryKeyConstraint,
+    String,
 )
-from sqlalchemy.orm import relationship, backref
+from sqlalchemy.orm import backref, relationship
 
 from mlflow.entities.model_registry import (
-    RegisteredModel,
     ModelVersion,
-    RegisteredModelTag,
     ModelVersionTag,
+    RegisteredModel,
+    RegisteredModelAlias,
+    RegisteredModelTag,
 )
-from mlflow.entities.model_registry.model_version_stages import STAGE_NONE, STAGE_DELETED_INTERNAL
+from mlflow.entities.model_registry.model_version_stages import STAGE_DELETED_INTERNAL, STAGE_NONE
 from mlflow.entities.model_registry.model_version_status import ModelVersionStatus
 from mlflow.store.db.base_sql_model import Base
-from mlflow.utils.time_utils import get_current_time_millis
+from mlflow.utils.time import get_current_time_millis
 
 
 class SqlRegisteredModel(Base):
@@ -35,8 +36,9 @@ class SqlRegisteredModel(Base):
     __table_args__ = (PrimaryKeyConstraint("name", name="registered_model_pk"),)
 
     def __repr__(self):
-        return "<SqlRegisteredModel ({}, {}, {}, {})>".format(
-            self.name, self.description, self.creation_time, self.last_updated_time
+        return (
+            f"<SqlRegisteredModel ({self.name}, {self.description}, "
+            f"{self.creation_time}, {self.last_updated_time})>"
         )
 
     def to_mlflow_entity(self):
@@ -55,6 +57,7 @@ class SqlRegisteredModel(Base):
             self.description,
             [mvd.to_mlflow_entity() for mvd in latest_versions.values()],
             [tag.to_mlflow_entity() for tag in self.registered_model_tags],
+            [alias.to_mlflow_entity() for alias in self.registered_model_aliases],
         )
 
 
@@ -76,6 +79,8 @@ class SqlModelVersion(Base):
     current_stage = Column(String(20), default=STAGE_NONE)
 
     source = Column(String(500), nullable=True, default=None)
+
+    storage_location = Column(String(500), nullable=True, default=None)
 
     run_id = Column(String(32), nullable=True, default=None)
 
@@ -108,6 +113,7 @@ class SqlModelVersion(Base):
             self.status_message,
             [tag.to_mlflow_entity() for tag in self.model_version_tags],
             self.run_link,
+            [],
         )
 
 
@@ -128,7 +134,7 @@ class SqlRegisteredModelTag(Base):
     __table_args__ = (PrimaryKeyConstraint("key", "name", name="registered_model_tag_pk"),)
 
     def __repr__(self):
-        return "<SqlRegisteredModelTag ({}, {}, {})>".format(self.name, self.key, self.value)
+        return f"<SqlRegisteredModelTag ({self.name}, {self.key}, {self.value})>"
 
     # entity mappers
     def to_mlflow_entity(self):
@@ -163,10 +169,37 @@ class SqlModelVersionTag(Base):
     )
 
     def __repr__(self):
-        return "<SqlModelVersionTag ({}, {}, {}, {})>".format(
-            self.name, self.version, self.key, self.value
-        )
+        return f"<SqlModelVersionTag ({self.name}, {self.version}, {self.key}, {self.value})>"
 
     # entity mappers
     def to_mlflow_entity(self):
         return ModelVersionTag(self.key, self.value)
+
+
+class SqlRegisteredModelAlias(Base):
+    __tablename__ = "registered_model_aliases"
+    name = Column(
+        String(256),
+        ForeignKey(
+            "registered_models.name",
+            onupdate="cascade",
+            ondelete="cascade",
+            name="registered_model_alias_name_fkey",
+        ),
+    )
+    alias = Column(String(256), nullable=False)
+    version = Column(Integer, nullable=False)
+
+    # linked entities
+    registered_model = relationship(
+        "SqlRegisteredModel", backref=backref("registered_model_aliases", cascade="all")
+    )
+
+    __table_args__ = (PrimaryKeyConstraint("name", "alias", name="registered_model_alias_pk"),)
+
+    def __repr__(self):
+        return f"<SqlRegisteredModelAlias ({self.name}, {self.alias}, {self.version})>"
+
+    # entity mappers
+    def to_mlflow_entity(self):
+        return RegisteredModelAlias(self.alias, self.version)
