@@ -728,9 +728,9 @@ class SqlTraceTag(Base):
 class SqlTraceRequestMetadata(Base):
     __tablename__ = "trace_request_metadata"
 
-    key = Column(String(250))
+    key = Column(String(191))
     """
-    Metadata key: `String` (limit 250 characters).
+    Metadata key: `String` (limit 191 characters).
     """
     value = Column(String(8000), nullable=True)
     """

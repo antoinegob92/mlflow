@@ -194,7 +194,7 @@ CREATE TABLE tags (
 
 
 CREATE TABLE trace_request_metadata (
-	key VARCHAR(250) NOT NULL,
+	key VARCHAR(191) NOT NULL,
 	value VARCHAR(8000),
 	request_id VARCHAR(50) NOT NULL,
 	PRIMARY KEY (key, request_id),
