@@ -72,7 +72,7 @@ def upgrade():
             primary_key=True,
             nullable=False,
         ),
-        sa.Column("name", sa.String(length=255), primary_key=True, nullable=False),
+        sa.Column("name", sa.String(length=191), primary_key=True, nullable=False),
         sa.Column("value", sa.String(length=500), nullable=False),
         sa.PrimaryKeyConstraint("input_uuid", "name", name="input_tags_pk"),
     )
