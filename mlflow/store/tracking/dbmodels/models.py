@@ -613,9 +613,9 @@ class SqlInputTag(Base):
     Input UUID: `String` (limit 36 characters). Defined as *Non-null* in schema.
     *Foreign Key* into ``inputs`` table. Part of *Primary Key* for ``input_tags`` table.
     """
-    name = Column(String(255), nullable=False)
+    name = Column(String(191), nullable=False)
     """
-    Param name: `String` (limit 255 characters). Defined as *Non-null* in schema.
+    Param name: `String` (limit 191 characters). Defined as *Non-null* in schema.
     Part of *Primary Key* for ``input_tags`` table.
     """
     value = Column(String(500), nullable=False)

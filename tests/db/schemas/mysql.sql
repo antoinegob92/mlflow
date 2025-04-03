@@ -19,7 +19,7 @@ CREATE TABLE experiments (
 
 CREATE TABLE input_tags (
 	input_uuid VARCHAR(36) NOT NULL,
-	name VARCHAR(255) NOT NULL,
+	name VARCHAR(191) NOT NULL,
 	value VARCHAR(500) NOT NULL,
 	PRIMARY KEY (input_uuid, name)
 )
