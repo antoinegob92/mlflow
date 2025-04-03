@@ -44,7 +44,7 @@ def upgrade():
     )
     op.create_table(
         SqlTraceTag.__tablename__,
-        sa.Column("key", sa.String(length=250), primary_key=True, nullable=False),
+        sa.Column("key", sa.String(length=191), primary_key=True, nullable=False),
         sa.Column("value", sa.String(length=8000), nullable=True),
         sa.Column(
             "request_id",

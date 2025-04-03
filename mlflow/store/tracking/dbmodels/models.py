@@ -698,9 +698,9 @@ class SqlTraceInfo(Base):
 class SqlTraceTag(Base):
     __tablename__ = "trace_tags"
 
-    key = Column(String(250))
+    key = Column(String(191))
     """
-    Tag key: `String` (limit 250 characters).
+    Tag key: `String` (limit 191 characters).
     """
     value = Column(String(8000), nullable=True)
     """
