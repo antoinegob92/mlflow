@@ -27,7 +27,7 @@ CREATE TABLE registered_models (
 
 
 CREATE TABLE experiment_tags (
-	key VARCHAR(250) NOT NULL,
+	key VARCHAR(191) NOT NULL,
 	value VARCHAR(5000),
 	experiment_id INTEGER NOT NULL,
 	PRIMARY KEY (key, experiment_id),
