@@ -54,7 +54,7 @@ CREATE TABLE model_versions (
 
 
 CREATE TABLE registered_model_tags (
-	key VARCHAR(250) NOT NULL,
+	key VARCHAR(191) NOT NULL,
 	value VARCHAR(5000),
 	name VARCHAR(191) NOT NULL,
 	PRIMARY KEY (key, name),
