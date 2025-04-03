@@ -28,11 +28,11 @@ def upgrade():
     if SqlRegisteredModelAlias.__tablename__ not in get_existing_tables():
         op.create_table(
             SqlRegisteredModelAlias.__tablename__,
-            sa.Column("alias", sa.String(length=256), primary_key=True, nullable=False),
+            sa.Column("alias", sa.String(length=191), primary_key=True, nullable=False),
             sa.Column("version", sa.Integer(), nullable=False),
             sa.Column(
                 "name",
-                sa.String(length=256),
+                sa.String(length=191),
                 sa.ForeignKey(
                     "registered_models.name",
                     onupdate="cascade",

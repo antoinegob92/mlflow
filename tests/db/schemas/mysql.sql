@@ -87,9 +87,9 @@ CREATE TABLE model_versions (
 
 
 CREATE TABLE registered_model_aliases (
-	alias VARCHAR(256) NOT NULL,
+	alias VARCHAR(191) NOT NULL,
 	version INTEGER NOT NULL,
-	name VARCHAR(256) NOT NULL,
+	name VARCHAR(191) NOT NULL,
 	PRIMARY KEY (name, alias),
 	CONSTRAINT registered_model_alias_name_fkey FOREIGN KEY(name) REFERENCES registered_models (name) ON DELETE CASCADE ON UPDATE CASCADE
 )
