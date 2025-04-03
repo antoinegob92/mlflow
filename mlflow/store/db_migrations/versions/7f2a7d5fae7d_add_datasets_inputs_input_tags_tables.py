@@ -30,7 +30,7 @@ def upgrade():
             primary_key=True,
             nullable=False,
         ),
-        sa.Column("name", sa.String(length=500), primary_key=True, nullable=False),
+        sa.Column("name", sa.String(length=191), primary_key=True, nullable=False),
         sa.Column("digest", sa.String(length=36), primary_key=True, nullable=False),
         sa.Column("dataset_source_type", sa.String(length=36), nullable=False),
         sa.Column("dataset_source", sa.Text(), nullable=False),

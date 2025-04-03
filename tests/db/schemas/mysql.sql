@@ -47,7 +47,7 @@ CREATE TABLE registered_models (
 CREATE TABLE datasets (
 	dataset_uuid VARCHAR(36) NOT NULL,
 	experiment_id INTEGER NOT NULL,
-	name VARCHAR(500) NOT NULL,
+	name VARCHAR(191) NOT NULL,
 	digest VARCHAR(36) NOT NULL,
 	dataset_source_type VARCHAR(36) NOT NULL,
 	dataset_source TEXT NOT NULL,

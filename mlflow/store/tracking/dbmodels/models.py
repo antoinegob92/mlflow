@@ -498,9 +498,9 @@ class SqlDataset(Base):
     """
     Experiment ID to which this dataset belongs: *Foreign Key* into ``experiments`` table.
     """
-    name = Column(String(500), nullable=False)
+    name = Column(String(191), nullable=False)
     """
-    Param name: `String` (limit 500 characters). Defined as *Non-null* in schema.
+    Param name: `String` (limit 191 characters). Defined as *Non-null* in schema.
     Part of *Primary Key* for ``datasets`` table.
     """
     digest = Column(String(36), nullable=False)
