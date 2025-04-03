@@ -185,7 +185,7 @@ CREATE TABLE params (
 
 
 CREATE TABLE tags (
-	key VARCHAR(250) NOT NULL,
+	key VARCHAR(191) NOT NULL,
 	value VARCHAR(8000),
 	run_uuid VARCHAR(32) NOT NULL,
 	PRIMARY KEY (key, run_uuid),

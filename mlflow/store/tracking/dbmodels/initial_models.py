@@ -161,9 +161,9 @@ class SqlTag(Base):
 
     __tablename__ = "tags"
 
-    key = Column(String(250))
+    key = Column(String(191))
     """
-    Tag key: `String` (limit 250 characters). *Primary Key* for ``tags`` table.
+    Tag key: `String` (limit 191 characters). *Primary Key* for ``tags`` table.
     """
     value = Column(String(250), nullable=True)
     """

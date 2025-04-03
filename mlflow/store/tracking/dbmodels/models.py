@@ -295,9 +295,9 @@ class SqlTag(Base):
         Index(f"index_{__tablename__}_run_uuid", "run_uuid"),
     )
 
-    key = Column(String(250))
+    key = Column(String(191))
     """
-    Tag key: `String` (limit 250 characters). *Primary Key* for ``tags`` table.
+    Tag key: `String` (limit 191 characters). *Primary Key* for ``tags`` table.
     """
     value = Column(String(8000), nullable=True)
     """
