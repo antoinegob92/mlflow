@@ -47,7 +47,7 @@ def upgrade():
 
     op.create_table(
         SqlRegisteredModel.__tablename__,
-        Column("name", String(256), unique=True, nullable=False),
+        Column("name", String(191), unique=True, nullable=False),
         Column("creation_time", BigInteger, default=lambda: int(time.time() * 1000)),
         Column("last_updated_time", BigInteger, nullable=True, default=None),
         Column("description", String(5000), nullable=True),
@@ -56,12 +56,12 @@ def upgrade():
 
     op.create_table(
         SqlModelVersion.__tablename__,
-        Column("name", String(256), ForeignKey("registered_models.name", onupdate="cascade")),
+        Column("name", String(191), ForeignKey("registered_models.name", onupdate="cascade")),
         Column("version", Integer, nullable=False),
         Column("creation_time", BigInteger, default=lambda: int(time.time() * 1000)),
         Column("last_updated_time", BigInteger, nullable=True, default=None),
         Column("description", String(5000), nullable=True),
-        Column("user_id", String(256), nullable=True, default=None),
+        Column("user_id", String(191), nullable=True, default=None),
         Column("current_stage", String(20), default=STAGE_NONE),
         Column("source", String(500), nullable=True, default=None),
         Column("run_id", String(32), nullable=False),

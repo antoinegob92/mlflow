@@ -24,7 +24,7 @@ Base = declarative_base()
 class SqlRun(Base):
     __tablename__ = "runs"
     run_uuid = Column(String(32), nullable=False)
-    user_id = Column(String(256), nullable=True, default=None)
+    user_id = Column(String(191), nullable=True, default=None)
     experiment_id = Column(Integer)
 
     __table_args__ = (PrimaryKeyConstraint("experiment_id", name="experiment_pk"),)

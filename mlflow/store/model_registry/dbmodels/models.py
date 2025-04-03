@@ -24,7 +24,7 @@ from mlflow.utils.time_utils import get_current_time_millis
 class SqlRegisteredModel(Base):
     __tablename__ = "registered_models"
 
-    name = Column(String(256), unique=True, nullable=False)
+    name = Column(String(191), unique=True, nullable=False)
 
     creation_time = Column(BigInteger, default=get_current_time_millis)
 
@@ -61,7 +61,7 @@ class SqlRegisteredModel(Base):
 class SqlModelVersion(Base):
     __tablename__ = "model_versions"
 
-    name = Column(String(256), ForeignKey("registered_models.name", onupdate="cascade"))
+    name = Column(String(191), ForeignKey("registered_models.name", onupdate="cascade"))
 
     version = Column(Integer, nullable=False)
 
@@ -71,7 +71,7 @@ class SqlModelVersion(Base):
 
     description = Column(String(5000), nullable=True)
 
-    user_id = Column(String(256), nullable=True, default=None)
+    user_id = Column(String(191), nullable=True, default=None)
 
     current_stage = Column(String(20), default=STAGE_NONE)
 
@@ -114,7 +114,7 @@ class SqlModelVersion(Base):
 class SqlRegisteredModelTag(Base):
     __tablename__ = "registered_model_tags"
 
-    name = Column(String(256), ForeignKey("registered_models.name", onupdate="cascade"))
+    name = Column(String(191), ForeignKey("registered_models.name", onupdate="cascade"))
 
     key = Column(String(250), nullable=False)
 
@@ -138,7 +138,7 @@ class SqlRegisteredModelTag(Base):
 class SqlModelVersionTag(Base):
     __tablename__ = "model_version_tags"
 
-    name = Column(String(256))
+    name = Column(String(191))
 
     version = Column(Integer)
 

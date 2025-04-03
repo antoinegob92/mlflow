@@ -7,8 +7,8 @@ CREATE TABLE alembic_version (
 
 CREATE TABLE experiments (
 	experiment_id INTEGER NOT NULL,
-	name VARCHAR(256) NOT NULL,
-	artifact_location VARCHAR(256),
+	name VARCHAR(191) NOT NULL,
+	artifact_location VARCHAR(191),
 	lifecycle_stage VARCHAR(32),
 	creation_time BIGINT,
 	last_update_time BIGINT,
@@ -18,7 +18,7 @@ CREATE TABLE experiments (
 
 
 CREATE TABLE registered_models (
-	name VARCHAR(256) NOT NULL,
+	name VARCHAR(191) NOT NULL,
 	creation_time BIGINT,
 	last_updated_time BIGINT,
 	description VARCHAR(5000),
@@ -36,12 +36,12 @@ CREATE TABLE experiment_tags (
 
 
 CREATE TABLE model_versions (
-	name VARCHAR(256) NOT NULL,
+	name VARCHAR(191) NOT NULL,
 	version INTEGER NOT NULL,
 	creation_time BIGINT,
 	last_updated_time BIGINT,
 	description VARCHAR(5000),
-	user_id VARCHAR(256),
+	user_id VARCHAR(191),
 	current_stage VARCHAR(20),
 	source VARCHAR(500),
 	run_id VARCHAR(32),
@@ -56,7 +56,7 @@ CREATE TABLE model_versions (
 CREATE TABLE registered_model_tags (
 	key VARCHAR(250) NOT NULL,
 	value VARCHAR(5000),
-	name VARCHAR(256) NOT NULL,
+	name VARCHAR(191) NOT NULL,
 	PRIMARY KEY (key, name),
 	CONSTRAINT registered_model_tags_ibfk_1 FOREIGN KEY(name) REFERENCES registered_models (name) ON UPDATE CASCADE
 )
@@ -68,7 +68,7 @@ CREATE TABLE runs (
 	source_type VARCHAR(20),
 	source_name VARCHAR(500),
 	entry_point_name VARCHAR(50),
-	user_id VARCHAR(256),
+	user_id VARCHAR(191),
 	status VARCHAR(9),
 	start_time BIGINT,
 	end_time BIGINT,
@@ -115,7 +115,7 @@ CREATE TABLE metrics (
 CREATE TABLE model_version_tags (
 	key VARCHAR(250) NOT NULL,
 	value VARCHAR(5000),
-	name VARCHAR(256) NOT NULL,
+	name VARCHAR(191) NOT NULL,
 	version INTEGER NOT NULL,
 	PRIMARY KEY (key, name, version),
 	CONSTRAINT model_version_tags_ibfk_1 FOREIGN KEY(name, version) REFERENCES model_versions (name, version) ON UPDATE CASCADE

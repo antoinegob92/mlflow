@@ -52,14 +52,14 @@ class SqlExperiment(Base):
     """
     Experiment ID: `Integer`. *Primary Key* for ``experiment`` table.
     """
-    name = Column(String(256), unique=True, nullable=False)
+    name = Column(String(191), unique=True, nullable=False)
     """
-    Experiment name: `String` (limit 256 characters). Defined as *Unique* and *Non null* in
+    Experiment name: `String` (limit 191 characters). Defined as *Unique* and *Non null* in
                      table schema.
     """
-    artifact_location = Column(String(256), nullable=True)
+    artifact_location = Column(String(191), nullable=True)
     """
-    Default artifact location for this experiment: `String` (limit 256 characters). Defined as
+    Default artifact location for this experiment: `String` (limit 191 characters). Defined as
                                                     *Non null* in table schema.
     """
     lifecycle_stage = Column(String(32), default="active")
@@ -107,9 +107,9 @@ class SqlRun(Base):
     """
     Entry-point name that launched the run run: `String` (limit 50 characters).
     """
-    user_id = Column(String(256), nullable=True, default=None)
+    user_id = Column(String(191), nullable=True, default=None)
     """
-    User ID: `String` (limit 256 characters). Defaults to ``null``.
+    User ID: `String` (limit 191 characters). Defaults to ``null``.
     """
     status = Column(String(20), default="SCHEDULED")
     """
