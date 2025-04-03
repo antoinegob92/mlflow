@@ -378,9 +378,9 @@ class SqlLatestMetric(Base):
         Index(f"index_{__tablename__}_run_uuid", "run_uuid"),
     )
 
-    key = Column(String(250))
+    key = Column(String(191))
     """
-    Metric key: `String` (limit 250 characters). Part of *Primary Key* for ``latest_metrics`` table.
+    Metric key: `String` (limit 191 characters). Part of *Primary Key* for ``latest_metrics`` table.
     """
     value = Column(sa.types.Float(precision=53), nullable=False)
     """

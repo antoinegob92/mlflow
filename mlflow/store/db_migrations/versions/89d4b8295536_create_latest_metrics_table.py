@@ -126,7 +126,7 @@ def upgrade():
 
     op.create_table(
         SqlLatestMetric.__tablename__,
-        Column("key", String(length=250)),
+        Column("key", String(length=191)),
         Column("value", Float(precision=53), nullable=False),
         Column("timestamp", BigInteger, default=lambda: int(time.time())),
         Column("step", BigInteger, default=0, nullable=False),

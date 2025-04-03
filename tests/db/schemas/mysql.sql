@@ -86,7 +86,7 @@ CREATE TABLE runs (
 
 
 CREATE TABLE latest_metrics (
-	key VARCHAR(250) NOT NULL,
+	key VARCHAR(191) NOT NULL,
 	value DOUBLE NOT NULL,
 	timestamp BIGINT,
 	step BIGINT NOT NULL,
