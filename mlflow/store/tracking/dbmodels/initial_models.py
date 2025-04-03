@@ -187,9 +187,9 @@ class SqlTag(Base):
 class SqlMetric(Base):
     __tablename__ = "metrics"
 
-    key = Column(String(250))
+    key = Column(String(191))
     """
-    Metric key: `String` (limit 250 characters). Part of *Primary Key* for ``metrics`` table.
+    Metric key: `String` (limit 191 characters). Part of *Primary Key* for ``metrics`` table.
     """
     value = Column(Float, nullable=False)
     """

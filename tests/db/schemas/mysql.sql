@@ -152,7 +152,7 @@ CREATE TABLE latest_metrics (
 
 
 CREATE TABLE metrics (
-	key VARCHAR(250) NOT NULL,
+	key VARCHAR(191) NOT NULL,
 	value DOUBLE NOT NULL,
 	timestamp BIGINT NOT NULL,
 	run_uuid VARCHAR(32) NOT NULL,
